@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Environment variables — contains Firebase private key + Cloudinary secrets
+.env
+.env.*
+.env.local
+.env.*.local
+# Allow the safe template to be committed
+!.env.example
+
+# Generated / debug files
+config_output.json
+*-service-account.json
+*serviceAccount*.json
+
+# Logs
+*.log
+npm-debug.log*
+firebase-debug.log*
+firestore-debug.log*
+
+# Editor
+.vscode/
+.idea/
+*.sw?
+
+# OS
+.DS_Store
+Thumbs.db

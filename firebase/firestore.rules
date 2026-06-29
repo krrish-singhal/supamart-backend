@@ -1,0 +1,66 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn()  { return request.auth != null; }
+    function isOwner(uid)  { return isSignedIn() && request.auth.uid == uid; }
+    function isAdmin()     { return isSignedIn() && request.auth.token.role == 'ADMIN'; }
+    function isPartner()   { return isSignedIn() && request.auth.token.role == 'PARTNER'; }
+
+    // ── Public catalog: read-only to clients; ALL writes via Admin SDK (bypasses rules). ──
+    match /categories/{id} { allow read: if true;  allow write: if false; }
+    match /products/{id}   { allow read: if true;  allow write: if false; }
+    match /banners/{id}    { allow read: if true;  allow write: if false; }
+    match /offers/{id}     { allow read: if true;  allow write: if false; }
+    match /config/{id}     { allow read: if true;  allow write: if false; }
+
+    // ── Users: owner read/write own doc + subcollections; admin all. ──
+    match /users/{uid} {
+      allow read, write: if isOwner(uid) || isAdmin();
+
+      match /addresses/{addressId} {
+        allow read, write: if isOwner(uid) || isAdmin();
+      }
+
+      // Push notification inbox — owner reads, backend writes
+      match /notifications/{notifId} {
+        allow read: if isOwner(uid);
+        allow write: if false;
+      }
+    }
+
+    // ── Carts: owner only. ──
+    match /carts/{uid} { allow read, write: if isOwner(uid); }
+
+    // ── Orders: customer READ own; partner READ assigned; admin all.
+    //    No client WRITES — all writes via backend Admin SDK. ──
+    match /orders/{id} {
+      allow read: if isAdmin()
+                  || (isSignedIn() && resource.data.userId == request.auth.uid)
+                  || (isPartner() && resource.data.assignedPartnerId == request.auth.uid);
+      allow write: if false;
+    }
+
+    // ── Metrics: admin read; written by backend only. ──
+    match /metrics/{doc=**} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // ── Delivery partners: self read; admin all; no client write. ──
+    match /deliveryPartners/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow write: if false;
+    }
+
+    // ── Idempotency keys: backend-only. ──
+    match /orderIdempotency/{key} {
+      allow read, write: if false;
+    }
+
+    // ── Default deny everything else. ──
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

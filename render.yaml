@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: mymart-backend
+    env: node
+    plan: free
+    buildCommand: npm install --production
+    startCommand: node src/server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # Auto-generated secure random value by Render
+      - key: JWT_SECRET
+        generateValue: true
+
+      # Set these manually in the Render dashboard (Environment tab)
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: CLOUDINARY_UPLOAD_PRESET
+        sync: false
+
+      # Store defaults — update to real coordinates
+      - key: STORE_LATITUDE
+        value: "28.6139"
+      - key: STORE_LONGITUDE
+        value: "77.2090"
+      - key: SERVICE_RADIUS_KM
+        value: "5"
+
+      - key: WHATSAPP_ENABLED
+        value: "false"
