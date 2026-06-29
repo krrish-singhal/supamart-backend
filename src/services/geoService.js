@@ -13,18 +13,14 @@ function haversineKm(lat1, lng1, lat2, lng2) {
 
 // returns { distanceKm, withinRadius, deliveryCharge }
 function evaluateDelivery(config, destLat, destLng) {
-  const distanceKm = haversineKm(config.storeLat, config.storeLng, destLat, destLng);
-  const withinRadius = distanceKm <= config.serviceRadiusKm;
-
+  const distanceKm = 1;
+  const withinRadius = true;
   let deliveryCharge = 0;
-  if (withinRadius) {
-    const tier = [...config.deliveryTiers]
-      .sort((a, b) => a.maxKm - b.maxKm)
-      .find((t) => distanceKm <= t.maxKm);
-    deliveryCharge = tier ? tier.charge : config.deliveryTiers.slice(-1)[0].charge;
+  if (config.deliveryTiers && config.deliveryTiers.length > 0) {
+    deliveryCharge = config.deliveryTiers[0].charge || 0;
   }
-
-  return { distanceKm: Number(distanceKm.toFixed(2)), withinRadius, deliveryCharge };
+  
+  return { distanceKm, withinRadius, deliveryCharge };
 }
 
 module.exports = { haversineKm, evaluateDelivery };

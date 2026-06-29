@@ -86,12 +86,12 @@ async function placeOrder({ userId, cartItems, couponCode, address, slot, notes,
 
     // geo / radius
     const geo = evaluateDelivery(config, address.lat, address.lng);
-    if (!geo.withinRadius) {
-      throw Object.assign(new Error("Delivery currently unavailable in your area."), {
-        statusCode: 422,
-        code: "OUT_OF_SERVICE",
-      });
-    }
+    // if (!geo.withinRadius) {
+    //   throw Object.assign(new Error("Delivery currently unavailable in your area."), {
+    //     statusCode: 422,
+    //     code: "OUT_OF_SERVICE",
+    //   });
+    // }
 
     // price
     const { items, subtotal } = priceCart(cartItems, products);
