@@ -29,10 +29,11 @@ async function upload(buffer, folder = "products") {
       { folder, resource_type: "image", timeout: 60_000, agent: cloudinaryAgent },
       (err, result) => {
         if (err) {
-          console.warn(`Cloudinary upload failed: ${err.message}. Using dummy image.`);
+          console.warn(`Cloudinary upload failed: ${err.message}. Falling back to base64 string.`);
+          const base64Data = buffer.toString('base64');
           return resolve({
-            url: "https://ui-avatars.com/api/?name=User&background=random",
-            id: `dummy_${Date.now()}`
+            url: `data:image/jpeg;base64,${base64Data}`,
+            id: `local_${Date.now()}`
           });
         }
         resolve({ url: result.secure_url, id: result.public_id });

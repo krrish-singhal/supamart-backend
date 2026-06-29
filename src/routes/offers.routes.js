@@ -62,7 +62,10 @@ router.post(
 
     const offer = { id: snap.docs[0].id, ...snap.docs[0].data() };
     const now = Date.now();
-    if (now < offer.validFrom || now > offer.validTo) {
+    if (now < offer.validFrom) {
+      return res.status(422).json({ error: "Coupon is not yet active" });
+    }
+    if (now > offer.validTo) {
       return res.status(422).json({ error: "Coupon has expired" });
     }
     if (subtotal < offer.minValue) {
@@ -72,7 +75,21 @@ router.post(
     }
 
     const { computeDiscount } = require("../services/pricingService");
-    // For validation we don't have full product maps — just return the offer details
+    
+    let productMap = new Map();
+    if (items && items.length > 0) {
+      const productRefs = [...new Set(items.map(i => i.productId))].map(id => db().collection(COLLECTIONS.PRODUCTS).doc(id));
+      const productSnaps = await Promise.all(productRefs.map(r => r.get()));
+      productSnaps.forEach(s => {
+        if (s.exists) productMap.set(s.id, { id: s.id, ...s.data() });
+      });
+    }
+
+    const discount = computeDiscount(offer, subtotal, items || [], productMap);
+    if (discount <= 0) {
+      return res.status(422).json({ error: "Coupon is not applicable to any items in your cart." });
+    }
+
     res.json({
       code: offer.code,
       kind: offer.kind,
@@ -80,6 +97,7 @@ router.post(
       scope: offer.scope,
       maxDiscount: offer.maxDiscount,
       minValue: offer.minValue,
+      evaluatedDiscount: discount
     });
   })
 );

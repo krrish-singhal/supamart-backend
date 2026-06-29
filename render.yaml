@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: mymart-backend
+    name: supermart-backend
     env: node
     plan: free
     buildCommand: npm install --production

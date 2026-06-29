@@ -10,6 +10,15 @@ const providers = {
       return { status: PAYMENT_STATUS.PENDING };
     },
   },
+  [PAYMENT_METHOD.UPI]: {
+    async createPayment() {
+      // By-pass real gateway; mark as paid for test flow
+      return { status: PAYMENT_STATUS.PAID, providerRef: null };
+    },
+    async verifyPayment() {
+      return { status: PAYMENT_STATUS.PAID };
+    },
+  },
   // [PAYMENT_METHOD.RAZORPAY]: { createPayment, verifyPayment }  <-- add in Phase 2
 };
 

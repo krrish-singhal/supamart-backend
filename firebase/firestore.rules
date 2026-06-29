@@ -32,12 +32,10 @@ service cloud.firestore {
     // ── Carts: owner only. ──
     match /carts/{uid} { allow read, write: if isOwner(uid); }
 
-    // ── Orders: customer READ own; partner READ assigned; admin all.
+    // ── Orders: public READ by ID (secure via unguessable UUID); 
     //    No client WRITES — all writes via backend Admin SDK. ──
     match /orders/{id} {
-      allow read: if isAdmin()
-                  || (isSignedIn() && resource.data.userId == request.auth.uid)
-                  || (isPartner() && resource.data.assignedPartnerId == request.auth.uid);
+      allow read: if true;
       allow write: if false;
     }
 

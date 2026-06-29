@@ -55,7 +55,13 @@ function computeDiscount(offer, subtotal, items, products) {
     }, 0);
   }
 
-  let discount = offer.kind === OFFER_KIND.PERCENT ? (base * offer.value) / 100 : offer.value;
+  let discount = 0;
+  
+  if (offer.scope === OFFER_SCOPE.CATEGORY || offer.scope === OFFER_SCOPE.PRODUCT) {
+    if (base <= 0) return 0; // No matching items for this scoped offer
+  }
+
+  discount = offer.kind === OFFER_KIND.PERCENT ? (base * offer.value) / 100 : offer.value;
   if (offer.maxDiscount != null) discount = Math.min(discount, offer.maxDiscount);
   return Number(Math.min(discount, subtotal).toFixed(2));
 }
