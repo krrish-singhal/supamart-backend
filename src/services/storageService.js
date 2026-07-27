@@ -25,21 +25,30 @@ const cloudinaryAgent = new https.Agent({
 // uploads a buffer, returns CDN url + public id
 async function upload(buffer, folder = "products") {
   return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { folder, resource_type: "image", timeout: 60_000, agent: cloudinaryAgent },
-      (err, result) => {
-        if (err) {
-          console.warn(`Cloudinary upload failed: ${err.message}. Falling back to base64 string.`);
-          const base64Data = buffer.toString('base64');
-          return resolve({
-            url: `data:image/jpeg;base64,${base64Data}`,
-            id: `local_${Date.now()}`
-          });
+    try {
+      const stream = cloudinary.uploader.upload_stream(
+        { folder, resource_type: "image", timeout: 60_000, agent: cloudinaryAgent },
+        (err, result) => {
+          if (err) {
+            console.warn(`Cloudinary upload failed: ${err.message}. Falling back to base64 string.`);
+            const base64Data = buffer.toString('base64');
+            return resolve({
+              url: `data:image/jpeg;base64,${base64Data}`,
+              id: `local_${Date.now()}`
+            });
+          }
+          resolve({ url: result.secure_url, id: result.public_id });
         }
-        resolve({ url: result.secure_url, id: result.public_id });
-      }
-    );
-    stream.end(buffer);
+      );
+      stream.end(buffer);
+    } catch (err) {
+      console.warn(`Cloudinary sync error: ${err.message}. Falling back to base64 string.`);
+      const base64Data = buffer.toString('base64');
+      resolve({
+        url: `data:image/jpeg;base64,${base64Data}`,
+        id: `local_${Date.now()}`
+      });
+    }
   });
 }
 
