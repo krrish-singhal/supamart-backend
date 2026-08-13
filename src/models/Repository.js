@@ -62,12 +62,24 @@ class Repository {
     let q = this.col();
     where.forEach(([f, op, v]) => (q = q.where(f, op, v)));
     if (orderBy) q = q.orderBy(orderBy.field, orderBy.dir || "asc");
-    if (startAfter) q = q.startAfter(startAfter);
+    if (startAfter) {
+      // `startAfter` must be a DocumentSnapshot (or the exact orderBy field values) —
+      // passing the raw cursor id string straight through compares it against the
+      // orderBy field itself, which silently returns wrong/duplicate pages. Firestore's
+      // snapshot-based cursor also tiebreaks correctly when many docs share the same
+      // orderBy value (e.g. a whole batch seeded with one identical `createdAt`).
+      const startDoc = await this.col().doc(startAfter).get();
+      if (startDoc.exists) q = q.startAfter(startDoc);
+    }
     q = q.limit(limit);
     const snap = await q.get();
     const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     const last = snap.docs[snap.docs.length - 1] || null;
-    return { items, cursor: last ? last.id : null, hasMore: snap.size === limit };
+    const hasMore = snap.size === limit;
+    // Only hand back a cursor when there's actually more to fetch — otherwise a short
+    // result set (e.g. a brand with 2 products) still returns a truthy cursor and the
+    // client loops forever calling "load more" against a page that never grows.
+    return { items, cursor: hasMore && last ? last.id : null, hasMore };
   }
 }
 

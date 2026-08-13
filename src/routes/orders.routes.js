@@ -1,7 +1,7 @@
 const express = require("express");
 const { asyncHandler } = require("../middleware/error");
 const { authenticate, requireRole } = require("../middleware/auth");
-const { placeOrder, updateStatus } = require("../services/orderService");
+const { placeOrder, updateStatus, markPaymentClaimed, markPaid, rejectPayment, hideOrderForUser } = require("../services/orderService");
 const { createPayment } = require("../services/paymentService");
 const { sendOwnerWhatsApp } = require("../services/notificationService");
 const { Orders } = require("../models");
@@ -63,6 +63,11 @@ router.get(
       limit: Number(req.query.limit) || 20,
       startAfter: req.query.cursor || null,
     });
+    // Filtered here (not in the Firestore query) — most existing orders predate the
+    // hiddenFromUser field entirely, and a `where("hiddenFromUser","!=",true)` filter
+    // would incorrectly exclude every doc that's missing the field outright, not just
+    // ones explicitly set to true.
+    result.items = result.items.filter((o) => !o.hiddenFromUser);
     res.json(result);
   })
 );
@@ -97,6 +102,40 @@ router.patch(
   })
 );
 
+// PATCH /api/orders/:id/payment-claimed  (customer confirms they paid via UPI)
+router.patch(
+  "/:id/payment-claimed",
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const result = await markPaymentClaimed(req.params.id, req.user.uid);
+    res.json(result);
+  })
+);
+
+// PATCH /api/orders/:id/mark-paid  (admin confirms a UPI payment actually landed)
+router.patch(
+  "/:id/mark-paid",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const result = await markPaid(req.params.id);
+    res.json(result);
+  })
+);
+
+// PATCH /api/orders/:id/reject-payment  (admin rejects a manually-claimed UPI payment)
+router.patch(
+  "/:id/reject-payment",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const { reason, customReason } = req.body;
+    if (!reason) return res.status(422).json({ error: "reason is required" });
+    const result = await rejectPayment(req.params.id, reason, customReason);
+    res.json(result);
+  })
+);
+
 // PATCH /api/orders/:id/cancel  (customer cancels own order before PACKING)
 router.patch(
   "/:id/cancel",
@@ -112,6 +151,16 @@ router.patch(
       return res.status(422).json({ error: "Order cannot be cancelled at this stage", code: "CANNOT_CANCEL" });
     }
     const result = await updateStatus(req.params.id, ORDER_STATUS.CANCELLED);
+    res.json(result);
+  })
+);
+
+// PATCH /api/orders/:id/hide  (customer removes an order from their own order-history list)
+router.patch(
+  "/:id/hide",
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const result = await hideOrderForUser(req.params.id, req.user.uid);
     res.json(result);
   })
 );

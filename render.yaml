@@ -41,3 +41,19 @@ services:
 
       - key: WHATSAPP_ENABLED
         value: "false"
+
+      # Public URL of this service — used to build password-reset email links.
+      - key: PUBLIC_APP_URL
+        value: "https://supamart-backend-353k.onrender.com"
+
+      # SMTP for password-reset emails — set these in the Render dashboard.
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false

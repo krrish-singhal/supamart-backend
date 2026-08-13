@@ -25,12 +25,29 @@ router.get(
       productDocs.filter(Boolean).map((p) => [p.id, p])
     );
 
+    // Items whose product was deleted entirely (e.g. a catalog reseed) can never be
+    // priced — drop them and persist the cleanup so the cart self-heals instead of
+    // permanently 500-ing (or falling back to unpriced raw items the client can't render).
+    const staleItems = cart.items.filter((i) => !productMap.has(i.productId));
+    const liveItems = cart.items.filter((i) => productMap.has(i.productId));
+    if (staleItems.length > 0) {
+      await db().collection(COLLECTIONS.CARTS).doc(req.user.uid).set(
+        { items: liveItems, updatedAt: Date.now() },
+        { merge: true }
+      );
+    }
+
+    if (!liveItems.length) {
+      return res.json({ items: [], subtotal: 0, discount: 0, total: 0, removedCount: staleItems.length });
+    }
+
     let pricedItems, subtotal;
     try {
-      ({ items: pricedItems, subtotal } = priceCart(cart.items, productMap));
+      ({ items: pricedItems, subtotal } = priceCart(liveItems, productMap));
     } catch {
-      // Some products may be unavailable; return cart as-is without totals
-      return res.json({ items: cart.items, subtotal: 0, discount: 0, total: subtotal || 0 });
+      // A remaining item has a stock/variant problem (not a missing product, already
+      // handled above) — fail closed rather than show prices we can't stand behind.
+      return res.json({ items: [], subtotal: 0, discount: 0, total: 0, removedCount: staleItems.length });
     }
 
     let discount = 0;
@@ -58,6 +75,7 @@ router.get(
       subtotal,
       discount,
       total: Number((subtotal - discount).toFixed(2)),
+      removedCount: staleItems.length,
     });
   })
 );

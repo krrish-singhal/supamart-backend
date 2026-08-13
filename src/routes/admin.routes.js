@@ -165,7 +165,7 @@ router.get(
     doc.pipe(res);
 
     // Header
-    doc.fontSize(20).text("SupaMart", { align: "center" });
+    doc.fontSize(20).text("MS Traders", { align: "center" });
     doc.fontSize(12).text("Tax Invoice / Order Receipt", { align: "center" });
     doc.moveDown();
     doc.fontSize(10).text(`Order #${order.orderNo}`);

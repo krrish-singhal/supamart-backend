@@ -11,6 +11,7 @@ const authRoutes = require("./routes/auth.routes");
 const usersRoutes = require("./routes/users.routes");
 const addressesRoutes = require("./routes/addresses.routes");
 const categoriesRoutes = require("./routes/categories.routes");
+const brandsRoutes = require("./routes/brands.routes");
 const productsRoutes = require("./routes/products.routes");
 const bannersRoutes = require("./routes/banners.routes");
 const offersRoutes = require("./routes/offers.routes");
@@ -18,7 +19,9 @@ const cartRoutes = require("./routes/cart.routes");
 const configRoutes = require("./routes/config.routes");
 const orderRoutes = require("./routes/orders.routes");
 const deliveryPartnersRoutes = require("./routes/deliveryPartners.routes");
+const notificationsRoutes = require("./routes/notifications.routes");
 const adminRoutes = require("./routes/admin.routes");
+const pagesRoutes = require("./routes/pages.routes");
 
 const app = express();
 
@@ -30,13 +33,15 @@ app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use(morgan("tiny"));
 app.use(rateLimit({ windowMs: 60_000, max: 200, standardHeaders: true, legacyHeaders: false }));
 
-app.get("/", (req, res) => res.json({ status: "SupaMart API is running", version: "1.0.0" }));
+app.get("/", (req, res) => res.json({ status: "MS Traders API is running", version: "1.0.0" }));
 app.get("/health", (req, res) => res.json({ ok: true, ts: Date.now() }));
+app.use(pagesRoutes);
 
 // Public endpoints (no auth required)
 app.use("/api/auth", authRoutes);
 app.use("/api/config", configRoutes);
 app.use("/api/categories", categoriesRoutes);
+app.use("/api/brands", brandsRoutes);
 app.use("/api/banners", bannersRoutes);
 app.use("/api/offers", offersRoutes);
 app.use("/api/products", productsRoutes);
@@ -47,6 +52,7 @@ app.use("/api/users", usersRoutes);
 app.use("/api/cart", cartRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/delivery-partners", deliveryPartnersRoutes);
+app.use("/api/notifications", notificationsRoutes);
 
 // Admin-only endpoints
 app.use("/api/admin", adminRoutes);
@@ -55,7 +61,7 @@ app.use(notFound);
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, "0.0.0.0", () => console.log(`SupaMart API running on :${PORT}`));
+const server = app.listen(PORT, "0.0.0.0", () => console.log(`MS Traders API running on :${PORT}`));
 
 // Allow long-running uploads (Cloudinary can take 30-60s on slow networks)
 server.keepAliveTimeout = 120_000;   // 2 min

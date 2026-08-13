@@ -10,16 +10,18 @@ const providers = {
       return { status: PAYMENT_STATUS.PENDING };
     },
   },
-  [PAYMENT_METHOD.UPI]: {
+  [PAYMENT_METHOD.UPI_MANUAL]: {
+    // UPI deep links have no reliable success callback, so we never auto-confirm here.
+    // The order stays PENDING until the customer taps "I've Paid" (-> AWAITING_CONFIRMATION),
+    // and the shop/admin verifies it manually and marks it PAID.
     async createPayment() {
-      // By-pass real gateway; mark as paid for test flow
-      return { status: PAYMENT_STATUS.PAID, providerRef: null };
+      return { status: PAYMENT_STATUS.PENDING, providerRef: null };
     },
     async verifyPayment() {
-      return { status: PAYMENT_STATUS.PAID };
+      return { status: PAYMENT_STATUS.PENDING };
     },
   },
-  // [PAYMENT_METHOD.RAZORPAY]: { createPayment, verifyPayment }  <-- add in Phase 2
+  // [PAYMENT_METHOD.RAZORPAY]: { createPayment, verifyPayment }  <-- add when a real gateway is wired up
 };
 
 function getProvider(method) {

@@ -20,7 +20,7 @@ if (!admin.apps.length) {
 
 const ADMIN_EMAIL    = process.env.ADMIN_EMAIL;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
-const ADMIN_NAME     = process.env.ADMIN_NAME || "SupaMart Admin";
+const ADMIN_NAME     = process.env.ADMIN_NAME || "MS Traders Admin";
 
 if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
   console.error("Error: ADMIN_EMAIL and ADMIN_PASSWORD must be set in .env");

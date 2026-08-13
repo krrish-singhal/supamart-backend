@@ -47,6 +47,9 @@ const statusEventSchema = Joi.object({
 const orderSchema = Joi.object({
   orderNo: Joi.number().integer().required(), // human friendly #1001
   userId: Joi.string().required(),
+  userName: Joi.string().allow("", null),
+  userEmail: Joi.string().allow("", null),
+  userPhone: Joi.string().allow("", null),
   items: Joi.array().items(orderItemSchema).min(1).required(),
   addressSnapshot: addressSnapshotSchema.required(),
   slot: Joi.object({ label: Joi.string().required(), from: Joi.string(), to: Joi.string() }).required(),
@@ -61,6 +64,10 @@ const orderSchema = Joi.object({
   distanceKm: Joi.number().min(0).required(),
   status: Joi.string().valid(...Object.values(ORDER_STATUS)).default(ORDER_STATUS.PLACED),
   statusHistory: Joi.array().items(statusEventSchema).default([]),
+  paymentRejectionReason: Joi.string().allow("", null),
+  // Customer-only "remove from my order history" — never shown to admin/partner, and
+  // never actually deletes the order doc (it's still a real business/accounting record).
+  hiddenFromUser: Joi.boolean().default(false),
   assignedPartnerId: Joi.string().allow(null),
   createdAt: Joi.number().required(),
   updatedAt: Joi.number().required(),

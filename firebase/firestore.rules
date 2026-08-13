@@ -13,6 +13,7 @@ service cloud.firestore {
     match /banners/{id}    { allow read: if true;  allow write: if false; }
     match /offers/{id}     { allow read: if true;  allow write: if false; }
     match /config/{id}     { allow read: if true;  allow write: if false; }
+    match /brands/{id}     { allow read: if true;  allow write: if false; }
 
     // ── Users: owner read/write own doc + subcollections; admin all. ──
     match /users/{uid} {

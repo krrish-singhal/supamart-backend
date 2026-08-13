@@ -14,9 +14,10 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 router.get(
   "/",
   asyncHandler(async (req, res) => {
-    const { categoryId, availability, featured, trending, limit = 20, cursor } = req.query;
+    const { categoryId, brandId, availability, featured, trending, limit = 20, cursor } = req.query;
     const where = [];
     if (categoryId) where.push(["categoryId", "==", categoryId]);
+    if (brandId) where.push(["brandId", "==", brandId]);
     if (availability) where.push(["availability", "==", availability]);
     if (featured === "true") where.push(["isFeatured", "==", true]);
     if (trending === "true") where.push(["isTrending", "==", true]);

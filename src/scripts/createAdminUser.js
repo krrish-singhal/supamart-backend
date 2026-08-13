@@ -1,5 +1,5 @@
 /**
- * One-time script: creates admin@supamart.in in Firebase Auth,
+ * One-time script: creates admin@mstraders.in in Firebase Auth,
  * sets role: ADMIN custom claim, and upserts a Firestore profile.
  *
  * Run: node src/scripts/createAdminUser.js
@@ -11,7 +11,7 @@ const { ROLES, COLLECTIONS } = require("../config/constants");
 
 const ADMIN_EMAIL    = process.env.ADMIN_EMAIL;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
-const ADMIN_NAME     = process.env.ADMIN_NAME || "SupaMart Admin";
+const ADMIN_NAME     = process.env.ADMIN_NAME || "MS Traders Admin";
 
 if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
   console.error("Error: ADMIN_EMAIL and ADMIN_PASSWORD must be set in .env");

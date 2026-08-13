@@ -3,16 +3,20 @@ const Joi = require("joi");
 // users/{uid}
 const userSchema = Joi.object({
   name: Joi.string().min(1).max(80).required(),
-  mobile: Joi.string().pattern(/^[0-9]{10}$/).required(),
-  email: Joi.string().email().allow("", null),
+  email: Joi.string().email().required(),
+  passwordHash: Joi.string().required(),
+  mobile: Joi.string().pattern(/^[0-9]{10}$/).allow("", null),
   defaultAddressId: Joi.string().allow(null),
   profileImage: Joi.string().uri().allow("", null),
   gender: Joi.string().valid("Male", "Female", "Other").allow("", null),
   dateOfBirth: Joi.string().allow("", null),
   isGuest: Joi.boolean().default(false),
   fcmTokens: Joi.array().items(Joi.string()).default([]),
+  favoriteProductIds: Joi.array().items(Joi.string()).default([]),
   totalOrders: Joi.number().integer().min(0).default(0),
   lifetimeSpending: Joi.number().min(0).default(0),
+  resetPasswordTokenHash: Joi.string().allow(null),
+  resetPasswordExpires: Joi.number().allow(null),
   createdAt: Joi.number().required(), // epoch ms
   updatedAt: Joi.number().required(),
 });

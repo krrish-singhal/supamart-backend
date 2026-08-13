@@ -1,4 +1,5 @@
-const { messaging } = require("../config/firebase");
+const { messaging, db } = require("../config/firebase");
+const { COLLECTIONS } = require("../config/constants");
 
 // --- Push (FCM) ---
 async function sendPush(tokens, title, body, data = {}) {
@@ -8,6 +9,32 @@ async function sendPush(tokens, title, body, data = {}) {
     notification: { title, body },
     data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),
   });
+}
+
+// --- In-app real-time notification (Firestore) + background push (FCM) ---
+// Writes to users/{userId}/notifications so the customer app's live onSnapshot
+// listener (and the bell badge) update instantly while the app is open, and also
+// fires an FCM push for when it isn't. Called from markPaid(), rejectPayment(), and
+// updateStatus() — i.e. every path that changes an order's payment/fulfillment state.
+//
+// Entirely best-effort and never throws: this fires *after* the order's own Firestore
+// transaction has already committed, so a notification failure (bad token, transient
+// Firestore error, whatever) must never bubble up and make the caller think the actual
+// order/payment change itself failed.
+async function notifyUser(userId, title, body, data = {}) {
+  try {
+    const now = Date.now();
+    const userRef = db().collection(COLLECTIONS.USERS).doc(userId);
+    await userRef.collection("notifications").add({ title, body, data, read: false, createdAt: now });
+
+    const userSnap = await userRef.get();
+    const fcmTokens = userSnap.exists ? userSnap.data().fcmTokens : null;
+    if (fcmTokens && fcmTokens.length > 0) {
+      await sendPush(fcmTokens, title, body, data);
+    }
+  } catch (err) {
+    console.error(`notifyUser: failed to notify user ${userId}`, err);
+  }
 }
 
 async function broadcast(allTokens, title, body) {
@@ -29,4 +56,4 @@ async function sendOwnerWhatsApp(order) {
   return { queued: true, message };
 }
 
-module.exports = { sendPush, broadcast, sendOwnerWhatsApp };
+module.exports = { sendPush, broadcast, sendOwnerWhatsApp, notifyUser };
