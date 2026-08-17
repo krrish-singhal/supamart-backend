@@ -3,7 +3,7 @@ const { asyncHandler } = require("../middleware/error");
 const { authenticate, requireRole } = require("../middleware/auth");
 const { placeOrder, updateStatus, markPaymentClaimed, markPaid, rejectPayment, hideOrderForUser } = require("../services/orderService");
 const { createPayment } = require("../services/paymentService");
-const { sendOwnerWhatsApp } = require("../services/notificationService");
+const { sendOwnerWhatsApp, notifyAdminsNewOrder } = require("../services/notificationService");
 const { Orders } = require("../models");
 const { ROLES, ORDER_STATUS } = require("../config/constants");
 
@@ -31,6 +31,7 @@ router.post(
     });
     await createPayment(order.paymentMethod, order);
     await sendOwnerWhatsApp(order);
+    await notifyAdminsNewOrder(order);
     res.status(201).json(order);
   })
 );

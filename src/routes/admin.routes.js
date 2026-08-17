@@ -37,6 +37,48 @@ router.get(
   })
 );
 
+// POST /api/admin/fcm-token — registers this browser's FCM token to receive "New Order"
+// pushes (admin-portal calls this once Notification permission is granted — see
+// admin-portal/src/services/pushNotifications.js). Tokens live on a shared config doc,
+// not a per-admin profile, because admin accounts have no Firestore user doc — just a
+// Firebase Auth user with a `role` custom claim.
+router.post(
+  "/fcm-token",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const { token } = req.body;
+    if (!token) return res.status(422).json({ error: "token is required" });
+    const admin = require("firebase-admin");
+    const ref = db().collection(COLLECTIONS.CONFIG).doc("adminDevices");
+    await ref.set(
+      { fcmTokens: admin.firestore.FieldValue.arrayUnion(token), updatedAt: Date.now() },
+      { merge: true }
+    );
+    res.json({ ok: true });
+  })
+);
+
+// DELETE /api/admin/fcm-token — unregisters a token (called on sign-out).
+router.delete(
+  "/fcm-token",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    // Accepts the token via query string too — apiDel() in the admin portal never sends a
+    // request body, so the client passes it as ?token= instead.
+    const token = req.body.token || req.query.token;
+    if (!token) return res.status(422).json({ error: "token is required" });
+    const admin = require("firebase-admin");
+    const ref = db().collection(COLLECTIONS.CONFIG).doc("adminDevices");
+    await ref.set(
+      { fcmTokens: admin.firestore.FieldValue.arrayRemove(token), updatedAt: Date.now() },
+      { merge: true }
+    );
+    res.json({ ok: true });
+  })
+);
+
 // GET /api/admin/dashboard — today + month summary
 router.get(
   "/dashboard",

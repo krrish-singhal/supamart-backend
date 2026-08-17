@@ -44,6 +44,30 @@ async function broadcast(allTokens, title, body) {
   }
 }
 
+// Pushes a "New Order" alert to every browser tab that has the admin portal open and has
+// registered for notifications (see POST /api/admin/fcm-token, which the admin portal calls
+// once it has Notification permission + a token). Tokens live on config/adminDevices rather
+// than a per-admin user doc — the admin portal only has Firebase Auth users with a `role`
+// custom claim, no Firestore user profile, so there's nowhere else to hang this. Best-effort
+// and never throws, same rationale as notifyUser: this fires after the order's own Firestore
+// transaction already committed, so a push failure must never look like the order failed.
+async function notifyAdminsNewOrder(order) {
+  try {
+    const snap = await db().collection(COLLECTIONS.CONFIG).doc("adminDevices").get();
+    const tokens = snap.exists ? snap.data().fcmTokens || [] : [];
+    if (!tokens.length) return;
+    const itemCount = (order.items || []).length;
+    await sendPush(
+      tokens,
+      `New order #${order.orderNo}`,
+      `₹${order.total} • ${itemCount} item${itemCount === 1 ? "" : "s"}`,
+      { type: "NEW_ORDER", orderId: order.id }
+    );
+  } catch (err) {
+    console.error("notifyAdminsNewOrder: failed to push", err);
+  }
+}
+
 // --- WhatsApp to store owner (optional, feature-flagged adapter) ---
 // Implement against your provider (e.g. WhatsApp Cloud API) when ready.
 async function sendOwnerWhatsApp(order) {
@@ -56,4 +80,4 @@ async function sendOwnerWhatsApp(order) {
   return { queued: true, message };
 }
 
-module.exports = { sendPush, broadcast, sendOwnerWhatsApp, notifyUser };
+module.exports = { sendPush, broadcast, sendOwnerWhatsApp, notifyUser, notifyAdminsNewOrder };
