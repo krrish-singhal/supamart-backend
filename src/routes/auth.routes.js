@@ -26,6 +26,40 @@ function signCustomerToken(uid, email) {
   return jwt.sign({ uid, role: ROLES.CUSTOMER, email }, JWT_SECRET, { expiresIn: "30d" });
 }
 
+// Mirrors a customer's email/password credentials into Firebase Auth, using the SAME uid
+// as their existing users/{uid} Firestore doc. This is what lets the customer app sign in
+// directly against Firebase Auth (fast, no dependency on this Render service waking up
+// from a cold start) instead of this bcrypt-verified endpoint, while every existing route
+// and the Firestore doc itself are completely unchanged — see customer/src/context/
+// AuthContext.js for the client side of this.
+//
+// Called fire-and-forget (not awaited) from /register and /login so it never adds latency
+// to those responses, and wrapped so it can never throw into the caller: a mirroring
+// failure must never break registration or login, which both keep working exactly as
+// before via this same endpoint regardless of whether the mirror succeeds.
+async function mirrorToFirebaseAuth(uid, email, password, name) {
+  // Written via a raw Firestore update (not Users.update()) deliberately: the Repository's
+  // Joi schema strips any field it doesn't know about (stripUnknown: true), which would
+  // silently discard firebaseAuthMirrored on every call and defeat the whole point of the
+  // flag (skipping redundant mirror attempts on future logins). Same pattern the
+  // DELETE /fcm-token route below already uses for the same reason.
+  const markMirrored = () =>
+    db().collection(COLLECTIONS.USERS).doc(uid).update({ firebaseAuthMirrored: true, updatedAt: Date.now() });
+
+  try {
+    await authAdmin().createUser({ uid, email, password, displayName: name || undefined });
+    await markMirrored();
+  } catch (err) {
+    if (err.code === "auth/uid-already-exists" || err.code === "auth/email-already-exists") {
+      // Already mirrored from a previous call — just make sure the flag reflects that so
+      // future logins don't keep re-attempting this.
+      await markMirrored().catch(() => {});
+    } else {
+      console.error(`mirrorToFirebaseAuth failed for uid=${uid}:`, err.message || err);
+    }
+  }
+}
+
 async function findUserByEmail(email) {
   const snap = await db().collection(COLLECTIONS.USERS).where("email", "==", email).limit(1).get();
   if (snap.empty) return null;
@@ -77,6 +111,7 @@ router.post(
     });
 
     const token = signCustomerToken(uid, normalizedEmail);
+    mirrorToFirebaseAuth(uid, normalizedEmail, password, name); // fire-and-forget — see comment above
     res.status(201).json({ ...publicUser(user), token });
   })
 );
@@ -99,6 +134,13 @@ router.post(
       return res.status(401).json({ error: "Incorrect password" });
     }
     const token = signCustomerToken(user.id, normalizedEmail);
+    // Lazy migration: the first time an existing (pre-migration) account logs in via this
+    // slow bcrypt-verified path, mirror it into Firebase Auth in the background using the
+    // plaintext password we just verified — every login after this one can then go
+    // through the fast Firebase Auth path instead. Fire-and-forget, never blocks this response.
+    if (!user.firebaseAuthMirrored) {
+      mirrorToFirebaseAuth(user.id, normalizedEmail, password, user.name);
+    }
     res.json({ ...publicUser(user), token });
   })
 );
