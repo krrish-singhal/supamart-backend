@@ -15,12 +15,18 @@ const COLLECTIONS = {
   BRANDS: "brands",
 };
 
+// Collapsed to a 4-step flow (+ CANCELLED, always reachable) for a one-shop/one-rider
+// operation — PACKING and READY_FOR_DELIVERY used to sit between ACCEPTED and
+// OUT_FOR_DELIVERY, but with a single shop and a single rider those were two extra
+// manual clicks that never carried distinct real-world information. If PACKING/READY
+// values still exist on old order docs (pre-migration), see
+// backend/src/jobs/collapsePackingReadyStatus.js.
 const ORDER_STATUS = {
   PLACED: "ORDER_PLACED",
   ACCEPTED: "ORDER_ACCEPTED",
-  PACKING: "PACKING",
-  READY: "READY_FOR_DELIVERY",
   OUT_FOR_DELIVERY: "OUT_FOR_DELIVERY",
+  PENDING_CONFIRMATION: "PENDING_CONFIRMATION",
+  DELIVERY_DISPUTED: "DELIVERY_DISPUTED",
   DELIVERED: "DELIVERED",
   CANCELLED: "CANCELLED",
 };
@@ -28,9 +34,8 @@ const ORDER_STATUS = {
 const ORDER_STATUS_FLOW = [
   ORDER_STATUS.PLACED,
   ORDER_STATUS.ACCEPTED,
-  ORDER_STATUS.PACKING,
-  ORDER_STATUS.READY,
   ORDER_STATUS.OUT_FOR_DELIVERY,
+  ORDER_STATUS.PENDING_CONFIRMATION,
   ORDER_STATUS.DELIVERED,
 ];
 

@@ -111,12 +111,12 @@ async function placeOrder({ userId, cartItems, couponCode, address, slot, notes,
 
     // geo / radius — delivery charge depends on subtotal (free above FREE_DELIVERY_THRESHOLD)
     const geo = evaluateDelivery(config, address.lat, address.lng, subtotal);
-    // if (!geo.withinRadius) {
-    //   throw Object.assign(new Error("Delivery currently unavailable in your area."), {
-    //     statusCode: 422,
-    //     code: "OUT_OF_SERVICE",
-    //   });
-    // }
+    if (!geo.withinRadius) {
+      throw Object.assign(new Error("Delivery currently unavailable in your area."), {
+        statusCode: 422,
+        code: "OUT_OF_SERVICE",
+      });
+    }
 
     // coupon — re-read inside tx using doc ref for consistency
     let discount = 0;
@@ -225,12 +225,26 @@ async function placeOrder({ userId, cartItems, couponCode, address, slot, notes,
   });
 }
 
-// validates forward-only status transitions
+// Validates forward-only status transitions — but not required to be the immediate next
+// step. A one-shop/one-rider admin needs to be able to correct/skip a status from the desk
+// (e.g. an order that was never marked Accepted but is already physically out the door)
+// without hitting "Invalid transition X -> Y". Still always forward, never backward, and
+// CANCELLED is reachable from any non-terminal state.
 function assertValidTransition(from, to) {
   if (to === ORDER_STATUS.CANCELLED) return true;
-  const fi = ORDER_STATUS_FLOW.indexOf(from);
+  
+  if (from === ORDER_STATUS.DELIVERY_DISPUTED) {
+    if (to === ORDER_STATUS.OUT_FOR_DELIVERY || to === ORDER_STATUS.DELIVERED) return true;
+  }
+
+  let normalizedFrom = from;
+  if (from === 'PACKING' || from === 'READY_FOR_DELIVERY') {
+    normalizedFrom = ORDER_STATUS.ACCEPTED;
+  }
+
+  const fi = ORDER_STATUS_FLOW.indexOf(normalizedFrom);
   const ti = ORDER_STATUS_FLOW.indexOf(to);
-  if (ti !== fi + 1) {
+  if (fi === -1 || ti === -1 || ti <= fi) {
     throw Object.assign(new Error(`Invalid transition ${from} -> ${to}`), { statusCode: 422 });
   }
   return true;
@@ -241,19 +255,24 @@ function assertValidTransition(from, to) {
 // customer identically, regardless of which client triggered the change.
 const STATUS_NOTIFICATION = {
   [ORDER_STATUS.ACCEPTED]: (orderNo) => ["Order Accepted", `Your order #${orderNo} has been accepted and will be prepared soon.`],
-  [ORDER_STATUS.PACKING]: (orderNo) => ["Packing your order", `Your order #${orderNo} is being packed.`],
-  [ORDER_STATUS.READY]: (orderNo) => ["Ready for delivery", `Your order #${orderNo} is ready and will be out for delivery shortly.`],
   [ORDER_STATUS.OUT_FOR_DELIVERY]: (orderNo) => ["Out for delivery", `Your order #${orderNo} is on its way.`],
+  [ORDER_STATUS.PENDING_CONFIRMATION]: (orderNo) => ["Confirm Delivery", `Your delivery partner marked order #${orderNo} as delivered. Please confirm in the app.`],
+  [ORDER_STATUS.DELIVERY_DISPUTED]: (orderNo) => ["Delivery Disputed", `We have registered your dispute for order #${orderNo}. Our team will contact you.`],
   [ORDER_STATUS.DELIVERED]: (orderNo) => ["Delivered", `Your order #${orderNo} has been delivered. Enjoy!`],
   [ORDER_STATUS.CANCELLED]: (orderNo) => ["Order Cancelled", `Your order #${orderNo} has been cancelled.`],
 };
 
-async function updateStatus(orderId, nextStatus) {
+async function updateStatus(orderId, nextStatus, user) {
   const ref = db().collection(COLLECTIONS.ORDERS).doc(orderId);
   const order = await db().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) throw Object.assign(new Error("Order not found"), { statusCode: 404 });
     const order = snap.data();
+
+    if (user && user.role === "PARTNER" && nextStatus === ORDER_STATUS.DELIVERED) {
+      throw Object.assign(new Error("Partners can only mark orders as PENDING_CONFIRMATION."), { statusCode: 403 });
+    }
+
     assertValidTransition(order.status, nextStatus);
 
     // Hard stop: a UPI_MANUAL order can never be fulfilled (packed/shipped/delivered) unless the
@@ -405,4 +424,83 @@ async function rejectPayment(orderId, reason, customReason) {
   return { id: orderId, paymentStatus: PAYMENT_STATUS.FAILED, status: ORDER_STATUS.CANCELLED, paymentRejectionReason: reasonText };
 }
 
-module.exports = { placeOrder, updateStatus, assertValidTransition, markPaymentClaimed, markPaid, rejectPayment, hideOrderForUser };
+async function confirmDelivery(orderId, userId, rating, review) {
+  const ref = db().collection(COLLECTIONS.ORDERS).doc(orderId);
+  const order = await db().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw Object.assign(new Error("Order not found"), { statusCode: 404 });
+    const orderData = snap.data();
+    
+    if (orderData.userId !== userId) {
+      throw Object.assign(new Error("Forbidden"), { statusCode: 403 });
+    }
+    if (orderData.status !== ORDER_STATUS.PENDING_CONFIRMATION) {
+      throw Object.assign(new Error("Order is not pending confirmation"), { statusCode: 422 });
+    }
+
+    const now = Date.now();
+    tx.update(ref, {
+      status: ORDER_STATUS.DELIVERED,
+      deliveryRating: rating || null,
+      deliveryReview: review || null,
+      statusHistory: [...orderData.statusHistory, { status: ORDER_STATUS.DELIVERED, at: now }],
+      updatedAt: now,
+    });
+
+    const inc = require("firebase-admin").firestore.FieldValue.increment;
+    const dayId = dayjs(orderData.createdAt).format("YYYY-MM-DD");
+    const dayRef = db().collection(COLLECTIONS.METRICS).doc("daily").collection("days").doc(dayId);
+    tx.set(dayRef, { delivered: inc(1), pending: inc(-1), updatedAt: now }, { merge: true });
+
+    return { ...orderData, id: orderId, status: ORDER_STATUS.DELIVERED };
+  });
+
+  const notification = STATUS_NOTIFICATION[ORDER_STATUS.DELIVERED];
+  if (notification) {
+    const [title, body] = notification(order.orderNo);
+    await notifyUser(userId, title, body, { type: "ORDER_STATUS", status: ORDER_STATUS.DELIVERED, orderId });
+  }
+
+  return order;
+}
+
+async function disputeDelivery(orderId, userId) {
+  const ref = db().collection(COLLECTIONS.ORDERS).doc(orderId);
+  const order = await db().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw Object.assign(new Error("Order not found"), { statusCode: 404 });
+    const orderData = snap.data();
+    
+    if (orderData.userId !== userId) {
+      throw Object.assign(new Error("Forbidden"), { statusCode: 403 });
+    }
+    if (orderData.status !== ORDER_STATUS.PENDING_CONFIRMATION) {
+      throw Object.assign(new Error("Order is not pending confirmation"), { statusCode: 422 });
+    }
+
+    const now = Date.now();
+    tx.update(ref, {
+      status: ORDER_STATUS.DELIVERY_DISPUTED,
+      statusHistory: [...orderData.statusHistory, { status: ORDER_STATUS.DELIVERY_DISPUTED, at: now }],
+      updatedAt: now,
+    });
+
+    return { ...orderData, id: orderId, status: ORDER_STATUS.DELIVERY_DISPUTED };
+  });
+
+  const notification = STATUS_NOTIFICATION[ORDER_STATUS.DELIVERY_DISPUTED];
+  if (notification) {
+    const [title, body] = notification(order.orderNo);
+    await notifyUser(userId, title, body, { type: "ORDER_STATUS", status: ORDER_STATUS.DELIVERY_DISPUTED, orderId });
+  }
+
+  return order;
+}
+
+module.exports = { placeOrder, updateStatus, assertValidTransition,  markPaymentClaimed,
+  markPaid,
+  rejectPayment,
+  hideOrderForUser,
+  confirmDelivery,
+  disputeDelivery,
+};

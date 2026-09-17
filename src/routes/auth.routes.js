@@ -7,7 +7,7 @@ const { authenticate } = require("../middleware/auth");
 const { Users, DeliveryPartners } = require("../models");
 const { db, authAdmin } = require("../config/firebase");
 const { COLLECTIONS, ROLES } = require("../config/constants");
-const { sendPasswordResetEmail } = require("../services/emailService");
+const { sendOTPEmail } = require("../services/emailService");
 const { publicUser } = require("../utils/publicUser");
 
 const router = express.Router();
@@ -125,23 +125,44 @@ router.post(
       return res.status(422).json({ error: "email and password are required" });
     }
     const normalizedEmail = normalizeEmail(email);
-    const user = await findUserByEmail(normalizedEmail);
-    if (!user || !user.passwordHash) {
+    
+    let user = await findUserByEmail(normalizedEmail);
+    let role = ROLES.CUSTOMER;
+
+    if (!user) {
+      const dpSnap = await db().collection(COLLECTIONS.DELIVERY_PARTNERS).where("email", "==", normalizedEmail).limit(1).get();
+      if (!dpSnap.empty) {
+        user = { id: dpSnap.docs[0].id, ...dpSnap.docs[0].data() };
+        role = ROLES.PARTNER;
+      }
+    }
+
+    if (!user || (!user.passwordHash && role === ROLES.CUSTOMER)) {
       return res.status(401).json({ error: "No account found with this email. Please register first." });
     }
-    const match = await bcrypt.compare(password, user.passwordHash);
-    if (!match) {
-      return res.status(401).json({ error: "Incorrect password" });
+
+    // Delivery Partners are always in Firebase Auth (created by Admin). We shouldn't verify bcrypt here if they don't have one.
+    // If they hit this fallback route for some reason, we can't verify them without a passwordHash.
+    if (role === ROLES.CUSTOMER) {
+      const match = await bcrypt.compare(password, user.passwordHash);
+      if (!match) {
+        return res.status(401).json({ error: "Incorrect password" });
+      }
+    } else {
+      // For PARTNER, verify via Firebase Auth Admin (simulate login by creating token, but we can't verify password directly via Admin SDK easily)
+      // Actually, if a partner falls back here, we reject because they MUST use the fast path.
+      return res.status(401).json({ error: "Contact the admin to reset your credentials. Delivery partners cannot register or reset credentials via the app." });
     }
+
     const token = signCustomerToken(user.id, normalizedEmail);
     // Lazy migration: the first time an existing (pre-migration) account logs in via this
     // slow bcrypt-verified path, mirror it into Firebase Auth in the background using the
     // plaintext password we just verified — every login after this one can then go
     // through the fast Firebase Auth path instead. Fire-and-forget, never blocks this response.
-    if (!user.firebaseAuthMirrored) {
+    if (role === ROLES.CUSTOMER && !user.firebaseAuthMirrored) {
       mirrorToFirebaseAuth(user.id, normalizedEmail, password, user.name);
     }
-    res.json({ ...publicUser(user), token });
+    res.json({ ...publicUser(user), token, role });
   })
 );
 
@@ -154,18 +175,58 @@ router.post(
     const normalizedEmail = normalizeEmail(email);
     const user = await findUserByEmail(normalizedEmail);
 
-    if (user) {
-      const rawToken = crypto.randomBytes(32).toString("hex");
-      const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
-      const expires = Date.now() + 60 * 60 * 1000; // 1 hour
-      await Users.update(user.id, { resetPasswordTokenHash: tokenHash, resetPasswordExpires: expires, updatedAt: Date.now() });
-
-      const resetUrl = `${PUBLIC_APP_URL}/reset-password?token=${rawToken}`;
-      await sendPasswordResetEmail(normalizedEmail, resetUrl);
+    if (!user) {
+      return res.status(404).json({ error: "Email not found in our system." });
     }
 
-    // Same response whether or not the account exists, so we don't leak which emails are registered.
-    res.json({ ok: true, message: "If an account exists for that email, a reset link has been sent." });
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expires = Date.now() + 15 * 60 * 1000; // 15 mins
+    await Users.update(user.id, { resetPasswordOtp: otp, resetPasswordExpires: expires, updatedAt: Date.now() });
+
+    const result = await sendOTPEmail(normalizedEmail, otp);
+    if (!result.delivered) {
+      return res.status(500).json({ error: "Failed to send the passcode email. Please try again later." });
+    }
+
+    res.json({ ok: true, message: "A 6-digit passcode has been sent to your email." });
+  })
+);
+
+// POST /api/auth/verify-reset-otp — checks the 6-digit OTP and generates a reset token
+router.post(
+  "/verify-reset-otp",
+  asyncHandler(async (req, res) => {
+    const { email, otp } = req.body;
+    if (!email || !otp) return res.status(422).json({ error: "email and otp are required" });
+    const normalizedEmail = normalizeEmail(email);
+
+    const snap = await db()
+      .collection(COLLECTIONS.USERS)
+      .where("email", "==", normalizedEmail)
+      .where("resetPasswordOtp", "==", otp.trim())
+      .limit(1)
+      .get();
+
+    if (snap.empty) return res.status(400).json({ error: "Invalid or incorrect OTP." });
+    const doc = snap.docs[0];
+    const user = doc.data();
+
+    if (!user.resetPasswordExpires || user.resetPasswordExpires < Date.now()) {
+      return res.status(400).json({ error: "This OTP has expired. Please request a new one." });
+    }
+
+    const rawToken = crypto.randomBytes(32).toString("hex");
+    const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+    const expires = Date.now() + 30 * 60 * 1000; // 30 mins
+
+    await Users.update(doc.id, {
+      resetPasswordOtp: null, // clear OTP
+      resetPasswordTokenHash: tokenHash,
+      resetPasswordExpires: expires,
+      updatedAt: Date.now(),
+    });
+
+    res.json({ ok: true, resetToken: rawToken });
   })
 );
 
@@ -200,6 +261,14 @@ router.post(
       resetPasswordExpires: null,
       updatedAt: Date.now(),
     });
+    
+    // Crucial: Update Firebase Auth to ensure the fast-path remains synchronized.
+    try {
+      await authAdmin().updateUser(doc.id, { password });
+    } catch (err) {
+      console.error(`Firebase auth sync failed during password reset for uid=${doc.id}:`, err);
+    }
+    
     res.json({ ok: true, message: "Password updated. You can now sign in." });
   })
 );
@@ -304,7 +373,12 @@ router.get(
   "/me",
   authenticate,
   asyncHandler(async (req, res) => {
-    const user = await Users.findById(req.user.uid);
+    let user;
+    if (req.user.role === ROLES.PARTNER) {
+      user = await DeliveryPartners.findById(req.user.uid);
+    } else {
+      user = await Users.findById(req.user.uid);
+    }
     if (!user) return res.status(404).json({ error: "User not found" });
     res.json({ ...publicUser(user), role: req.user.role });
   })

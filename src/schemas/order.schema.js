@@ -40,7 +40,7 @@ const addressSnapshotSchema = Joi.object({
 });
 
 const statusEventSchema = Joi.object({
-  status: Joi.string().valid(...Object.values(ORDER_STATUS)).required(),
+  status: Joi.string().valid(...Object.values(ORDER_STATUS), "PACKING", "PENDING", "READY_FOR_DELIVERY").required(),
   at: Joi.number().required(),
 });
 
@@ -62,13 +62,15 @@ const orderSchema = Joi.object({
   discount: Joi.number().min(0).default(0),
   total: Joi.number().min(0).required(),
   distanceKm: Joi.number().min(0).required(),
-  status: Joi.string().valid(...Object.values(ORDER_STATUS)).default(ORDER_STATUS.PLACED),
+  status: Joi.string().valid(...Object.values(ORDER_STATUS), "PACKING", "PENDING", "READY_FOR_DELIVERY").default(ORDER_STATUS.PLACED),
   statusHistory: Joi.array().items(statusEventSchema).default([]),
   paymentRejectionReason: Joi.string().allow("", null),
   // Customer-only "remove from my order history" — never shown to admin/partner, and
   // never actually deletes the order doc (it's still a real business/accounting record).
   hiddenFromUser: Joi.boolean().default(false),
   assignedPartnerId: Joi.string().allow(null),
+  deliveryRating: Joi.number().min(1).max(5).allow(null),
+  deliveryReview: Joi.string().allow("", null),
   createdAt: Joi.number().required(),
   updatedAt: Joi.number().required(),
 });
@@ -95,10 +97,16 @@ const offerSchema = Joi.object({
 // deliveryPartners/{uid}
 const deliveryPartnerSchema = Joi.object({
   name: Joi.string().required(),
+  email: Joi.string().email().required(),
   mobile: Joi.string().pattern(/^[0-9]{10}$/).required(),
   isActive: Joi.boolean().default(true),
   fcmTokens: Joi.array().items(Joi.string()).default([]),
   currentOrders: Joi.array().items(Joi.string()).default([]),
+  currentLocation: Joi.object({
+    lat: Joi.number().required(),
+    lng: Joi.number().required(),
+    updatedAt: Joi.number().required(),
+  }).allow(null).default(null),
   createdAt: Joi.number().required(),
 });
 

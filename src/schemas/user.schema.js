@@ -15,6 +15,7 @@ const userSchema = Joi.object({
   favoriteProductIds: Joi.array().items(Joi.string()).default([]),
   totalOrders: Joi.number().integer().min(0).default(0),
   lifetimeSpending: Joi.number().min(0).default(0),
+  resetPasswordOtp: Joi.string().allow(null),
   resetPasswordTokenHash: Joi.string().allow(null),
   resetPasswordExpires: Joi.number().allow(null),
   createdAt: Joi.number().required(), // epoch ms

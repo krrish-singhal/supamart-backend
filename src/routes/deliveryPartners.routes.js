@@ -54,20 +54,35 @@ router.post(
   authenticate,
   requireRole(ROLES.ADMIN),
   asyncHandler(async (req, res) => {
+    const { name, mobile, email, password } = req.body;
+    if (!name || !mobile || !email || !password) {
+      return res.status(422).json({ error: "name, mobile, email, and password are required" });
+    }
+
+    const { authAdmin } = require("../config/firebase");
+    
+    // Create the user in Firebase Auth
+    const userRecord = await authAdmin().createUser({
+      email,
+      password,
+      displayName: name,
+    });
+
+    const uid = userRecord.uid;
     const now = Date.now();
-    const partner = await DeliveryPartners.create(req.body.uid || null, {
-      name: req.body.name,
-      mobile: req.body.mobile,
+    const partner = await DeliveryPartners.create(uid, {
+      name,
+      email,
+      mobile,
       isActive: true,
       fcmTokens: [],
       currentOrders: [],
       createdAt: now,
     });
+
     // Set custom claim so they can authenticate as PARTNER
-    if (req.body.uid) {
-      const { authAdmin } = require("../config/firebase");
-      await authAdmin().setCustomUserClaims(req.body.uid, { role: ROLES.PARTNER });
-    }
+    await authAdmin().setCustomUserClaims(uid, { role: ROLES.PARTNER });
+    
     res.status(201).json(partner);
   })
 );
@@ -84,6 +99,30 @@ router.put(
     const update = Object.fromEntries(
       Object.entries(req.body).filter(([k]) => allowed.includes(k))
     );
+    const updated = await DeliveryPartners.update(req.params.uid, update);
+    res.json(updated);
+  })
+);
+
+// PATCH /api/delivery-partners/:uid/location — partner updates their location
+router.patch(
+  "/:uid/location",
+  authenticate,
+  asyncHandler(async (req, res) => {
+    if (req.user.uid !== req.params.uid) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const { lat, lng } = req.body;
+    if (typeof lat !== "number" || typeof lng !== "number") {
+      return res.status(400).json({ error: "lat and lng must be numbers" });
+    }
+    const update = {
+      currentLocation: {
+        lat,
+        lng,
+        updatedAt: Date.now(),
+      }
+    };
     const updated = await DeliveryPartners.update(req.params.uid, update);
     res.json(updated);
   })
@@ -140,7 +179,7 @@ router.get(
     const activeQuery = await db()
       .collection(COLLECTIONS.ORDERS)
       .where("assignedPartnerId", "==", req.params.uid)
-      .where("status", "in", [ORDER_STATUS.ACCEPTED, ORDER_STATUS.PACKING, ORDER_STATUS.READY, ORDER_STATUS.OUT_FOR_DELIVERY])
+      .where("status", "in", [ORDER_STATUS.ACCEPTED, ORDER_STATUS.OUT_FOR_DELIVERY])
       .get();
       
     stats.activeOrders = activeQuery.size;

@@ -1,7 +1,7 @@
 const express = require("express");
 const { asyncHandler } = require("../middleware/error");
 const { authenticate, requireRole } = require("../middleware/auth");
-const { placeOrder, updateStatus, markPaymentClaimed, markPaid, rejectPayment, hideOrderForUser } = require("../services/orderService");
+const { placeOrder, updateStatus, markPaymentClaimed, markPaid, rejectPayment, hideOrderForUser, confirmDelivery, disputeDelivery } = require("../services/orderService");
 const { createPayment } = require("../services/paymentService");
 const { sendOwnerWhatsApp, notifyAdminsNewOrder } = require("../services/notificationService");
 const { Orders } = require("../models");
@@ -36,13 +36,28 @@ router.post(
   })
 );
 
-// GET /api/orders  (admin — all orders, paginated, filterable by status)
+// GET /api/orders  (admin — all orders, paginated, filterable by status | partner - assigned orders)
 router.get(
   "/",
   authenticate,
-  requireRole(ROLES.ADMIN),
+  requireRole(ROLES.ADMIN, ROLES.PARTNER),
   asyncHandler(async (req, res) => {
-    const where = req.query.status ? [["status", "==", req.query.status]] : [];
+    let where = [];
+    if (req.user.role === ROLES.PARTNER) {
+      where.push(["assignedPartnerId", "==", req.user.uid]);
+      // Partners usually only want non-delivered orders, but they can filter.
+      if (req.query.status) {
+        where.push(["status", "==", req.query.status]);
+      } else {
+        // Exclude delivered/cancelled by default or just return all assigned.
+        // Returning all assigned for now.
+      }
+    } else {
+      if (req.query.status) {
+        where.push(["status", "==", req.query.status]);
+      }
+    }
+
     const result = await Orders.paginate({
       where,
       orderBy: { field: "createdAt", dir: "desc" },
@@ -98,7 +113,28 @@ router.patch(
   requireRole(ROLES.ADMIN, ROLES.PARTNER),
   asyncHandler(async (req, res) => {
     if (!req.body.status) return res.status(422).json({ error: "status is required" });
-    const result = await updateStatus(req.params.id, req.body.status);
+    const result = await updateStatus(req.params.id, req.body.status, req.user);
+    res.json(result);
+  })
+);
+
+// PATCH /api/orders/:id/confirm-delivery  (customer confirms delivery and adds rating)
+router.patch(
+  "/:id/confirm-delivery",
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const { rating, review } = req.body;
+    const result = await confirmDelivery(req.params.id, req.user.uid, rating, review);
+    res.json(result);
+  })
+);
+
+// PATCH /api/orders/:id/dispute-delivery  (customer disputes delivery)
+router.patch(
+  "/:id/dispute-delivery",
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const result = await disputeDelivery(req.params.id, req.user.uid);
     res.json(result);
   })
 );
@@ -172,9 +208,10 @@ router.patch(
   authenticate,
   requireRole(ROLES.ADMIN),
   asyncHandler(async (req, res) => {
-    if (!req.body.partnerId) return res.status(422).json({ error: "partnerId is required" });
+    // partnerId can be empty string/null to unassign
+    const partnerId = req.body.partnerId || null;
     const updated = await Orders.update(req.params.id, {
-      assignedPartnerId: req.body.partnerId,
+      assignedPartnerId: partnerId,
       updatedAt: Date.now(),
     });
     res.json(updated);

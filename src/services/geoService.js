@@ -15,12 +15,17 @@ function haversineKm(lat1, lng1, lat2, lng2) {
 
 // returns { distanceKm, withinRadius, deliveryCharge }
 function evaluateDelivery(config, destLat, destLng, subtotal = 0) {
-  const distanceKm = 1;
-  const withinRadius = true;
+  const distanceKm = haversineKm(config.storeLat, config.storeLng, destLat, destLng);
+  const withinRadius = distanceKm <= (config.serviceRadiusKm || 5);
   let deliveryCharge = 0;
-  if (config.deliveryTiers && config.deliveryTiers.length > 0) {
-    deliveryCharge = config.deliveryTiers[0].charge || 0;
+  
+  if (withinRadius && config.deliveryTiers && config.deliveryTiers.length > 0) {
+    // Sort tiers by maxKm ascending just in case
+    const tiers = [...config.deliveryTiers].sort((a, b) => a.maxKm - b.maxKm);
+    const tier = tiers.find(t => distanceKm <= t.maxKm);
+    deliveryCharge = tier ? tier.charge : (tiers[tiers.length - 1].charge || 0);
   }
+
   if (subtotal >= FREE_DELIVERY_THRESHOLD) {
     deliveryCharge = 0;
   }
