@@ -311,7 +311,7 @@ async function updateStatus(orderId, nextStatus, user) {
   const notification = STATUS_NOTIFICATION[nextStatus];
   if (notification) {
     const [title, body] = notification(order.orderNo);
-    await notifyUser(order.userId, title, body, { type: "ORDER_STATUS", status: nextStatus, orderId });
+    notifyUser(order.userId, title, body, { type: "ORDER_STATUS", status: nextStatus, orderId }).catch(e => console.error(e));
   }
 
   return { id: orderId, status: nextStatus };
@@ -370,12 +370,12 @@ async function markPaid(orderId) {
   });
 
   if (!order.alreadyPaid) {
-    await notifyUser(
+    notifyUser(
       order.userId,
       "Payment approved!",
       `Your order #${order.orderNo} is confirmed — it'll be delivered to your doorstep soon.`,
       { type: "PAYMENT_APPROVED", orderId }
-    );
+    ).catch(e => console.error(e));
   }
 
   return { id: orderId, paymentStatus: PAYMENT_STATUS.PAID };
@@ -414,12 +414,12 @@ async function rejectPayment(orderId, reason, customReason) {
     return { ...current, id: orderId };
   });
 
-  await notifyUser(
+  notifyUser(
     order.userId,
     "Order rejected",
     reasonText,
     { type: "PAYMENT_REJECTED", orderId }
-  );
+  ).catch(e => console.error(e));
 
   return { id: orderId, paymentStatus: PAYMENT_STATUS.FAILED, status: ORDER_STATUS.CANCELLED, paymentRejectionReason: reasonText };
 }
@@ -458,7 +458,7 @@ async function confirmDelivery(orderId, userId, rating, review) {
   const notification = STATUS_NOTIFICATION[ORDER_STATUS.DELIVERED];
   if (notification) {
     const [title, body] = notification(order.orderNo);
-    await notifyUser(userId, title, body, { type: "ORDER_STATUS", status: ORDER_STATUS.DELIVERED, orderId });
+    notifyUser(userId, title, body, { type: "ORDER_STATUS", status: ORDER_STATUS.DELIVERED, orderId }).catch(e => console.error(e));
   }
 
   return order;
@@ -491,7 +491,7 @@ async function disputeDelivery(orderId, userId) {
   const notification = STATUS_NOTIFICATION[ORDER_STATUS.DELIVERY_DISPUTED];
   if (notification) {
     const [title, body] = notification(order.orderNo);
-    await notifyUser(userId, title, body, { type: "ORDER_STATUS", status: ORDER_STATUS.DELIVERY_DISPUTED, orderId });
+    notifyUser(userId, title, body, { type: "ORDER_STATUS", status: ORDER_STATUS.DELIVERY_DISPUTED, orderId }).catch(e => console.error(e));
   }
 
   return order;
