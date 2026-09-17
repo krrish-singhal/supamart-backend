@@ -34,7 +34,7 @@ app.use(morgan("tiny"));
 app.use(rateLimit({ windowMs: 60_000, max: 200, standardHeaders: true, legacyHeaders: false }));
 
 app.get("/", (req, res) => res.json({ status: "MS Traders API is running", version: "1.0.0" }));
-app.get("/health", (req, res) => res.json({ ok: true, ts: Date.now() }));
+app.get("/health", (req, res) => res.status(200).json({ status: "ok" }));
 app.use(pagesRoutes);
 
 // Public endpoints (no auth required)
