@@ -23,7 +23,7 @@ const configSchema = Joi.object({
   slots: Joi.array().items(slotSchema).min(1).required(),
   orderSeq: Joi.number().integer().min(1000).default(1000), // running order number
   updatedAt: Joi.number().required(),
-});
+}).unknown(true);
 
 // metrics/daily/{YYYY-MM-DD} and metrics/monthly/{YYYY-MM}
 const metricsSchema = Joi.object({
