@@ -397,7 +397,10 @@ router.get(
   "/firebase-token",
   authenticate,
   asyncHandler(async (req, res) => {
-    const token = await authAdmin().createCustomToken(req.user.uid);
+    const token = await authAdmin().createCustomToken(
+      req.user.uid,
+      req.user.role ? { role: req.user.role } : undefined
+    );
     res.json({ token });
   })
 );

@@ -61,10 +61,12 @@ app.use(notFound);
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, "0.0.0.0", () => console.log(`MS Traders API running on :${PORT}`));
-
-// Allow long-running uploads (Cloudinary can take 30-60s on slow networks)
-server.keepAliveTimeout = 120_000;   // 2 min
-server.headersTimeout   = 125_000;   // slightly above keepAlive
+let server;
+if (require.main === module) {
+  server = app.listen(PORT, "0.0.0.0", () => console.log(`MS Traders API running on :${PORT}`));
+  // Allow long-running uploads (Cloudinary can take 30-60s on slow networks)
+  server.keepAliveTimeout = 120_000;   // 2 min
+  server.headersTimeout   = 125_000;   // slightly above keepAlive
+}
 
 module.exports = app;
