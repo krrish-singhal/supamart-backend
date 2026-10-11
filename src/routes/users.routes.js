@@ -5,6 +5,7 @@ const { authenticate, requireRole } = require("../middleware/auth");
 const { Users } = require("../models");
 const { ROLES } = require("../config/constants");
 const { upload: uploadToCloud } = require("../services/storageService");
+const { deleteUserAccount } = require("../services/accountDeletionService");
 const { publicUser } = require("../utils/publicUser");
 
 const router = express.Router();
@@ -93,6 +94,28 @@ router.get(
       startAfter: req.query.cursor || null,
     });
     res.json({ ...result, items: result.items.map(publicUser) });
+  })
+);
+
+// DELETE /api/users/me — authenticated customer permanently deletes their own account
+router.delete(
+  "/me",
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const { password } = req.body || {};
+    const result = await deleteUserAccount(req.user.uid, req.user, { password });
+    res.json(result);
+  })
+);
+
+// DELETE /api/users/:uid — user deletes own account or admin deletes account
+router.delete(
+  "/:uid",
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const { password, forceAdmin } = req.body || {};
+    const result = await deleteUserAccount(req.params.uid, req.user, { password, forceAdmin });
+    res.json(result);
   })
 );
 

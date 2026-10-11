@@ -15,28 +15,42 @@ service cloud.firestore {
     match /config/{id}     { allow read: if true;  allow write: if false; }
     match /brands/{id}     { allow read: if true;  allow write: if false; }
 
-    // ── Users: owner read/write own doc + subcollections; admin all. ──
+    // ── Users: owner read own doc + subcollections; admin all. ──
+    // Direct client writes are disallowed — all mutations go through the backend Admin SDK.
     match /users/{uid} {
-      allow read, write: if isOwner(uid) || isAdmin();
+      allow read: if isOwner(uid) || isAdmin();
+      allow write: if false;
 
       match /addresses/{addressId} {
-        allow read, write: if isOwner(uid) || isAdmin();
+        allow read: if isOwner(uid) || isAdmin();
+        allow write: if false;
       }
 
-      // Push notification inbox — owner reads, backend writes
+      // Push notification inbox — owner/admin reads, backend writes
       match /notifications/{notifId} {
-        allow read: if isOwner(uid);
+        allow read: if isOwner(uid) || isAdmin();
         allow write: if false;
       }
     }
 
-    // ── Carts: owner only. ──
-    match /carts/{uid} { allow read, write: if isOwner(uid); }
+    // ── Carts: owner and admin read; client writes disallowed. ──
+    match /carts/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow write: if false;
+    }
 
-    // ── Orders: public READ by ID (secure via unguessable UUID); 
-    //    No client WRITES — all writes via backend Admin SDK. ──
+    // ── Orders: strictly authenticated and owner / assigned partner / admin access only. ──
+    // Eliminates the public read vulnerability (allow read: if true).
+    // Customers can read only their own orders.
+    // Delivery partners can read only orders assigned to them.
+    // Administrators retain full read access via verified ADMIN role claim.
+    // Client writes are strictly disallowed — all mutations go through the backend Admin SDK.
     match /orders/{id} {
-      allow read: if true;
+      allow read: if isSignedIn() && (
+        isAdmin() ||
+        (('userId' in resource.data) && resource.data.userId == request.auth.uid) ||
+        (isPartner() && ('assignedPartnerId' in resource.data) && resource.data.assignedPartnerId == request.auth.uid)
+      );
       allow write: if false;
     }
 
