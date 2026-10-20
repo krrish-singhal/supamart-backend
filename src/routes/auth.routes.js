@@ -127,6 +127,9 @@ router.post(
     if (!email && !mobile) {
       return res.status(422).json({ error: "Mobile number or email is required" });
     }
+    if (!password) {
+      return res.status(422).json({ error: "Email and password are required" });
+    }
 
     let user = null;
     let role = ROLES.CUSTOMER;

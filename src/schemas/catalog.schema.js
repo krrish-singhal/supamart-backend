@@ -60,10 +60,14 @@ const productSchema = Joi.object({
   isAvailableToday: Joi.boolean().default(true),
   isFeatured: Joi.boolean().default(false),
   isTrending: Joi.boolean().default(false),
+  isBestseller: Joi.boolean().default(false),
+  isMonthlyStockUp: Joi.boolean().default(false),
+  tags: Joi.array().items(Joi.string()).default([]),
+  weight: Joi.number().allow(0, null).default(0),
   soldCount: Joi.number().integer().min(0).default(0),
   createdAt: Joi.number().required(),
   updatedAt: Joi.number().required(),
-});
+}).unknown(true);
 
 // banners/{bannerId}
 const bannerSchema = Joi.object({

@@ -49,13 +49,21 @@ async function notifyRestockSubscribers(previous, updated) {
 router.get(
   "/",
   asyncHandler(async (req, res) => {
-    const { categoryId, brandId, availability, featured, trending, limit = 20, cursor } = req.query;
+    const { categoryId, brandId, availability, featured, trending, bestseller, monthlyStockUp, limit = 20, cursor } = req.query;
     const where = [];
     if (categoryId) {
       const catSnap = await db().collection(COLLECTIONS.CATEGORIES).get();
       const allCats = catSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      const childIds = allCats.filter((c) => c.parentId === categoryId).map((c) => c.id);
-      const targetIds = [categoryId, ...childIds];
+      const targetIds = [categoryId];
+      // Include every descendant so products assigned to nested admin categories
+      // also appear when a customer opens their parent category.
+      for (let index = 0; index < targetIds.length; index += 1) {
+        allCats
+          .filter((category) => category.parentId === targetIds[index])
+          .forEach((category) => {
+            if (!targetIds.includes(category.id)) targetIds.push(category.id);
+          });
+      }
       if (targetIds.length === 1) {
         where.push(["categoryId", "==", categoryId]);
       } else {
@@ -66,6 +74,8 @@ router.get(
     if (availability) where.push(["availability", "==", availability]);
     if (featured === "true") where.push(["isFeatured", "==", true]);
     if (trending === "true") where.push(["isTrending", "==", true]);
+    if (bestseller === "true") where.push(["isBestseller", "==", true]);
+    if (monthlyStockUp === "true") where.push(["isMonthlyStockUp", "==", true]);
 
     const result = await Products.paginate({
       where,
@@ -168,8 +178,8 @@ function getTermAliases(term) {
   if (["detergent", "wash", "cleaner", "cleaning"].includes(t)) {
     ["detergent", "surf excel", "ariel", "tide", "wheel", "rin", "washing", "powder", "bar", "liquid", "dishwash", "vim", "bleach"].forEach((a) => aliases.add(a));
   }
-  if (["biscuit", "cookie", "snack", "chip", "crisp", "rusk"].includes(t)) {
-    ["biscuit", "cookie", "rusk", "snack", "chip", "crisp", "lays", "good day", "50-50", "bourbon", "marie", "parle", "chocochip", "crunch"].forEach((a) => aliases.add(a));
+  if (["biscuit", "cookie", "snack", "chip", "crisp", "rusk", "bakery", "bread", "cake", "toast", "brownie"].includes(t)) {
+    ["biscuit", "cookie", "rusk", "snack", "chip", "crisp", "lays", "good day", "50-50", "bourbon", "marie", "parle", "chocochip", "crunch", "bakery", "bread", "cake", "toast", "bakes", "bun", "croissant", "brownie", "golden bakery"].forEach((a) => aliases.add(a));
   }
   if (["vegetable", "veggie"].includes(t)) {
     ["vegetable", "veggie", "potato", "onion", "tomato", "carrot", "beans", "brinjal", "chilli", "cucumber", "ginger"].forEach((a) => aliases.add(a));

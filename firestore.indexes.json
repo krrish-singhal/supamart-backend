@@ -28,6 +28,14 @@
       "collectionGroup": "products",
       "queryScope": "COLLECTION",
       "fields": [
+        { "fieldPath": "isMonthlyStockUp", "order": "ASCENDING" },
+        { "fieldPath": "createdAt",        "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "products",
+      "queryScope": "COLLECTION",
+      "fields": [
         { "fieldPath": "isFeatured", "order": "ASCENDING"  },
         { "fieldPath": "createdAt",  "order": "DESCENDING" }
       ]
