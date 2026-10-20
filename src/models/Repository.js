@@ -52,6 +52,10 @@ class Repository {
     return snap.exists ? { id: snap.id, ...snap.data() } : null;
   }
 
+  async get(id) {
+    return this.findById(id);
+  }
+
   async delete(id) {
     await this.col().doc(id).delete();
     return { id, deleted: true };

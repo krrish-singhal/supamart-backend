@@ -12,6 +12,7 @@ const userSchema = Joi.object({
   dateOfBirth: Joi.string().allow("", null),
   isGuest: Joi.boolean().default(false),
   fcmTokens: Joi.array().items(Joi.string()).default([]),
+  offerNotificationsEnabled: Joi.boolean().default(true),
   favoriteProductIds: Joi.array().items(Joi.string()).default([]),
   totalOrders: Joi.number().integer().min(0).default(0),
   lifetimeSpending: Joi.number().min(0).default(0),

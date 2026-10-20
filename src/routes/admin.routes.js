@@ -159,7 +159,9 @@ router.post(
     const usersSnap = await db().collection(COLLECTIONS.USERS).get();
     const tokens = [];
     usersSnap.docs.forEach((d) => {
-      const fcmTokens = d.data().fcmTokens || [];
+      const user = d.data();
+      if (user.offerNotificationsEnabled === false) return;
+      const fcmTokens = user.fcmTokens || [];
       tokens.push(...fcmTokens);
     });
     if (!tokens.length) return res.json({ sent: 0 });

@@ -1,6 +1,6 @@
 const express = require("express");
 const { asyncHandler } = require("../middleware/error");
-const { authenticate, requireRole } = require("../middleware/auth");
+const { authenticate, optionalAuthenticate, requireRole } = require("../middleware/auth");
 const { Offers } = require("../models");
 const { ROLES, COLLECTIONS } = require("../config/constants");
 const { db } = require("../config/firebase");
@@ -45,7 +45,7 @@ router.get(
 // POST /api/offers/validate — customer: validate a coupon code and return discount details
 router.post(
   "/validate",
-  authenticate,
+  optionalAuthenticate,
   asyncHandler(async (req, res) => {
     const { code, subtotal, items } = req.body;
     if (!code) return res.status(422).json({ error: "coupon code required" });
@@ -116,6 +116,7 @@ router.post(
     }
     const offerData = { ...req.body };
     if (image) offerData.image = image;
+    if (offerData.code) offerData.code = String(offerData.code).trim().toUpperCase();
 
     // Convert booleans and numbers properly
     offerData.isActive = req.body.isActive === 'true' || req.body.isActive === true;
@@ -150,6 +151,7 @@ router.put(
     }
     const updateData = { ...req.body };
     if (image !== undefined) updateData.image = image;
+    if (updateData.code) updateData.code = String(updateData.code).trim().toUpperCase();
 
     if (req.body.isActive !== undefined) {
       updateData.isActive = req.body.isActive === 'true' || req.body.isActive === true;

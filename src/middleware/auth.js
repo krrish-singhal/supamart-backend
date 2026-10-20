@@ -37,6 +37,34 @@ async function authenticate(req, res, next) {
   }
 }
 
+async function optionalAuthenticate(req, res, next) {
+  try {
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+    if (!token) return next();
+
+    try {
+      const decoded = await authAdmin().verifyIdToken(token);
+      req.user = {
+        uid: decoded.uid,
+        role: decoded.role || ROLES.CUSTOMER,
+        email: decoded.email || null,
+        phone: decoded.phone_number || null,
+      };
+      return next();
+    } catch (_firebaseErr) {
+      // Fall through to custom JWT
+    }
+
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = { uid: decoded.uid, role: decoded.role || ROLES.CUSTOMER, phone: decoded.phone };
+    return next();
+  } catch (e) {
+    // Continue unauthenticated if token invalid or expired
+    return next();
+  }
+}
+
 // Role guard: requireRole(ROLES.ADMIN)
 function requireRole(...allowed) {
   return (req, res, next) => {
@@ -47,4 +75,5 @@ function requireRole(...allowed) {
   };
 }
 
-module.exports = { authenticate, requireRole };
+module.exports = { authenticate, optionalAuthenticate, requireRole };
+

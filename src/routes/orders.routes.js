@@ -4,8 +4,9 @@ const { authenticate, requireRole } = require("../middleware/auth");
 const { placeOrder, updateStatus, markPaymentClaimed, markPaid, rejectPayment, hideOrderForUser, confirmDelivery, disputeDelivery } = require("../services/orderService");
 const { createPayment } = require("../services/paymentService");
 const { sendOwnerWhatsApp, notifyAdminsNewOrder } = require("../services/notificationService");
-const { Orders } = require("../models");
-const { ROLES, ORDER_STATUS } = require("../config/constants");
+const { Orders, DeliveryPartners } = require("../models");
+const { db } = require("../config/firebase");
+const { ROLES, ORDER_STATUS, COLLECTIONS, REFUND_STATUS } = require("../config/constants");
 
 const router = express.Router();
 
@@ -93,7 +94,7 @@ router.get(
   "/:id",
   authenticate,
   asyncHandler(async (req, res) => {
-    const order = await Orders.get(req.params.id);
+    const order = await Orders.findById(req.params.id);
     if (!order) return res.status(404).json({ error: "Order not found" });
     const isAdmin = req.user.role === ROLES.ADMIN;
     const isOwner = order.userId === req.user.uid;
@@ -101,6 +102,21 @@ router.get(
       req.user.role === ROLES.PARTNER && order.assignedPartnerId === req.user.uid;
     if (!isAdmin && !isOwner && !isAssignedPartner) {
       return res.status(403).json({ error: "Forbidden" });
+    }
+    // If a delivery partner is assigned, ensure partner name and contact info are attached for customer tracking
+    if (order.assignedPartnerId && (!order.deliveryBoyName || !order.deliveryBoyPhone || !order.deliveryPartner)) {
+      try {
+        const p = await DeliveryPartners.findById(order.assignedPartnerId);
+        if (p) {
+          order.deliveryBoyName = order.deliveryBoyName || p.name || "";
+          order.deliveryBoyPhone = order.deliveryBoyPhone || p.phone || p.mobile || "";
+          order.deliveryPartner = order.deliveryPartner || {
+            id: order.assignedPartnerId,
+            name: p.name || "",
+            phone: p.phone || p.mobile || "",
+          };
+        }
+      } catch (_) {}
     }
     res.json(order);
   })
@@ -188,6 +204,47 @@ router.patch(
       return res.status(422).json({ error: "Order cannot be cancelled at this stage", code: "CANNOT_CANCEL" });
     }
     const result = await updateStatus(req.params.id, ORDER_STATUS.CANCELLED);
+
+    // Create refund record if one doesn't exist already
+    try {
+      const existingRef = await db()
+        .collection(COLLECTIONS.REFUNDS)
+        .where("orderId", "==", req.params.id)
+        .limit(1)
+        .get();
+
+      if (existingRef.empty) {
+        const now = Date.now();
+        await db().collection(COLLECTIONS.REFUNDS).add({
+          orderId: req.params.id,
+          orderNo: order.orderNo || "N/A",
+          userId: order.userId,
+          userName: order.userName || "Customer",
+          userEmail: order.userEmail || "",
+          userPhone: order.userPhone || "",
+          address: order.address || null,
+          items: order.items || [],
+          totalRefund: Number(order.total || order.totalAmount || 0),
+          refundTo: order.paymentMethod === "COD" ? "Cash / UPI" : "UPI app",
+          refundReference: `REF-${order.orderNo || Date.now()}`,
+          reason: req.body.reason || "Order cancelled",
+          status: REFUND_STATUS.PENDING_APPROVAL,
+          timeline: [
+            { step: "ORDER_CANCELLED", label: "Order cancelled", at: now, completed: true },
+            { step: "REFUND_INITIATED", label: "Refund Initiated", at: now, completed: true },
+            { step: "ADMIN_APPROVAL", label: "Admin approval", at: null, completed: false, current: true, note: "Shop owner reviewing case" },
+            { step: "MONEY_RECEIVED", label: "Money received", at: null, completed: false, note: "Awaiting shop approval" },
+          ],
+          rejectReason: null,
+          dismissedByUser: false,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    } catch (refundErr) {
+      console.error("[Orders] Failed to create auto-refund:", refundErr);
+    }
+
     res.json(result);
   })
 );
@@ -208,12 +265,37 @@ router.patch(
   authenticate,
   requireRole(ROLES.ADMIN),
   asyncHandler(async (req, res) => {
+    const order = await Orders.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (order.status === ORDER_STATUS.DELIVERED || order.status === ORDER_STATUS.CANCELLED) {
+      return res.status(422).json({
+        error: `Order #${order.orderNo || req.params.id} is closed (${order.status}) and cannot be edited.`,
+        code: "ORDER_CLOSED",
+      });
+    }
     // partnerId can be empty string/null to unassign
     const partnerId = req.body.partnerId || null;
-    const updated = await Orders.update(req.params.id, {
+    let partnerData = null;
+    if (partnerId) {
+      try {
+        const p = await DeliveryPartners.findById(partnerId);
+        if (p) {
+          partnerData = {
+            id: partnerId,
+            name: p.name || "",
+            phone: p.phone || p.mobile || "",
+          };
+        }
+      } catch (_) {}
+    }
+    const updatePayload = {
       assignedPartnerId: partnerId,
+      deliveryPartner: partnerData,
+      deliveryBoyName: partnerData ? partnerData.name : null,
+      deliveryBoyPhone: partnerData ? partnerData.phone : null,
       updatedAt: Date.now(),
-    });
+    };
+    const updated = await Orders.update(req.params.id, updatePayload);
     res.json(updated);
   })
 );

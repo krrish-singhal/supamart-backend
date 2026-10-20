@@ -116,14 +116,38 @@ router.patch(
     if (typeof lat !== "number" || typeof lng !== "number") {
       return res.status(400).json({ error: "lat and lng must be numbers" });
     }
+    const now = Date.now();
     const update = {
       currentLocation: {
         lat,
         lng,
-        updatedAt: Date.now(),
+        updatedAt: now,
       }
     };
     const updated = await DeliveryPartners.update(req.params.uid, update);
+
+    // Sync to active order(s) so customer gets live coordinates in real-time
+    try {
+      const activeOrdersSnap = await db()
+        .collection(COLLECTIONS.ORDERS)
+        .where("assignedPartnerId", "==", req.params.uid)
+        .where("status", "in", [ORDER_STATUS.OUT_FOR_DELIVERY, ORDER_STATUS.ORDER_ACCEPTED])
+        .get();
+
+      if (!activeOrdersSnap.empty) {
+        const batch = db().batch();
+        activeOrdersSnap.docs.forEach((d) => {
+          batch.update(d.ref, {
+            partnerLocation: { lat, lng, updatedAt: now },
+            updatedAt: now,
+          });
+        });
+        await batch.commit();
+      }
+    } catch (syncErr) {
+      console.warn("Failed to sync partner location to active order:", syncErr.message);
+    }
+
     res.json(updated);
   })
 );

@@ -13,7 +13,7 @@ const { publicUser } = require("../utils/publicUser");
 const router = express.Router();
 
 const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) throw new Error("JWT_SECRET env var is required");
+if (!JWT_SECRET) throw new Error("JWT_SECRET is required");
 
 const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || "http://localhost:5000";
 const BCRYPT_ROUNDS = 10;
@@ -72,38 +72,41 @@ async function findUserByMobile(mobile) {
   return { id: snap.docs[0].id, ...snap.docs[0].data() };
 }
 
-// POST /api/auth/register — new customer signs up with name, email, mobile, password
+// POST /api/auth/register — new customer signs up with name, mobile, and optional email/password
 router.post(
   "/register",
   asyncHandler(async (req, res) => {
     const { name, email, mobile, password } = req.body;
-    if (!name || !email || !mobile || !password) {
-      return res.status(422).json({ error: "name, email, mobile and password are required" });
+    if (!name || !mobile) {
+      return res.status(422).json({ error: "name and mobile are required" });
     }
-    if (!/^[0-9]{10}$/.test(String(mobile))) {
+    const cleanMobile = String(mobile).trim().replace(/[^0-9]/g, "");
+    if (!/^[0-9]{10}$/.test(cleanMobile)) {
       return res.status(422).json({ error: "Mobile number must be exactly 10 digits" });
     }
-    if (String(password).length < 8) {
-      return res.status(422).json({ error: "Password must be at least 8 characters" });
-    }
-    const normalizedEmail = normalizeEmail(email);
-    const existingEmail = await findUserByEmail(normalizedEmail);
-    if (existingEmail) {
-      return res.status(409).json({ error: "An account with this email already exists. Please sign in instead." });
-    }
-    const existingMobile = await findUserByMobile(mobile);
+
+    const normalizedEmail = email ? normalizeEmail(email) : `${cleanMobile}@ms-traders.in`;
+    const userPassword = password && String(password).length >= 8 ? password : `MST@${cleanMobile}`;
+
+    const existingMobile = await findUserByMobile(cleanMobile);
     if (existingMobile) {
       return res.status(409).json({ error: "An account with this mobile number already exists. Please sign in instead." });
     }
+    if (email) {
+      const existingEmail = await findUserByEmail(normalizedEmail);
+      if (existingEmail) {
+        return res.status(409).json({ error: "An account with this email already exists. Please sign in instead." });
+      }
+    }
 
     const now = Date.now();
-    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    const passwordHash = await bcrypt.hash(userPassword, BCRYPT_ROUNDS);
     const uid = db().collection(COLLECTIONS.USERS).doc().id;
     const user = await Users.create(uid, {
-      name,
+      name: String(name).trim(),
       email: normalizedEmail,
       passwordHash,
-      mobile,
+      mobile: cleanMobile,
       defaultAddressId: null,
       isGuest: false,
       createdAt: now,
@@ -111,57 +114,65 @@ router.post(
     });
 
     const token = signCustomerToken(uid, normalizedEmail);
-    mirrorToFirebaseAuth(uid, normalizedEmail, password, name); // fire-and-forget — see comment above
+    mirrorToFirebaseAuth(uid, normalizedEmail, userPassword, name); // fire-and-forget
     res.status(201).json({ ...publicUser(user), token });
   })
 );
 
-// POST /api/auth/login — existing customer signs in with email + password
+// POST /api/auth/login — signs in with email/password or mobile number
 router.post(
   "/login",
   asyncHandler(async (req, res) => {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(422).json({ error: "email and password are required" });
+    const { email, password, mobile } = req.body;
+    if (!email && !mobile) {
+      return res.status(422).json({ error: "Mobile number or email is required" });
     }
-    const normalizedEmail = normalizeEmail(email);
-    
-    let user = await findUserByEmail(normalizedEmail);
-    let role = ROLES.CUSTOMER;
 
-    if (!user) {
-      const dpSnap = await db().collection(COLLECTIONS.DELIVERY_PARTNERS).where("email", "==", normalizedEmail).limit(1).get();
-      if (!dpSnap.empty) {
-        user = { id: dpSnap.docs[0].id, ...dpSnap.docs[0].data() };
-        role = ROLES.PARTNER;
+    let user = null;
+    let role = ROLES.CUSTOMER;
+    let normalizedEmail = email ? normalizeEmail(email) : null;
+
+    if (mobile) {
+      const cleanMobile = String(mobile).trim().replace(/[^0-9]/g, "");
+      user = await findUserByMobile(cleanMobile);
+      if (!user) {
+        // Also check if delivery partner has this mobile
+        const dpSnap = await db().collection(COLLECTIONS.DELIVERY_PARTNERS).where("mobile", "==", cleanMobile).limit(1).get();
+        if (!dpSnap.empty) {
+          user = { id: dpSnap.docs[0].id, ...dpSnap.docs[0].data() };
+          role = ROLES.PARTNER;
+        }
+      }
+      if (user) {
+        normalizedEmail = user.email || `${cleanMobile}@ms-traders.in`;
+      }
+    } else if (email) {
+      user = await findUserByEmail(normalizedEmail);
+      if (!user) {
+        const dpSnap = await db().collection(COLLECTIONS.DELIVERY_PARTNERS).where("email", "==", normalizedEmail).limit(1).get();
+        if (!dpSnap.empty) {
+          user = { id: dpSnap.docs[0].id, ...dpSnap.docs[0].data() };
+          role = ROLES.PARTNER;
+        }
       }
     }
 
-    if (!user || (!user.passwordHash && role === ROLES.CUSTOMER)) {
-      return res.status(401).json({ error: "No account found with this email. Please register first." });
+    if (!user) {
+      return res.status(404).json({
+        notFound: true,
+        error: "No account found. Please create an account to continue.",
+      });
     }
 
-    // Delivery Partners are always in Firebase Auth (created by Admin). We shouldn't verify bcrypt here if they don't have one.
-    // If they hit this fallback route for some reason, we can't verify them without a passwordHash.
-    if (role === ROLES.CUSTOMER) {
+    // If password was provided, verify it
+    if (password && role === ROLES.CUSTOMER && user.passwordHash) {
       const match = await bcrypt.compare(password, user.passwordHash);
       if (!match) {
         return res.status(401).json({ error: "Incorrect password" });
       }
-    } else {
-      // For PARTNER, verify via Firebase Auth Admin (simulate login by creating token, but we can't verify password directly via Admin SDK easily)
-      // Actually, if a partner falls back here, we reject because they MUST use the fast path.
-      return res.status(401).json({ error: "Contact the admin to reset your credentials. Delivery partners cannot register or reset credentials via the app." });
     }
 
-    const token = signCustomerToken(user.id, normalizedEmail);
-    // Lazy migration: the first time an existing (pre-migration) account logs in via this
-    // slow bcrypt-verified path, mirror it into Firebase Auth in the background using the
-    // plaintext password we just verified — every login after this one can then go
-    // through the fast Firebase Auth path instead. Fire-and-forget, never blocks this response.
-    if (role === ROLES.CUSTOMER && !user.firebaseAuthMirrored) {
-      mirrorToFirebaseAuth(user.id, normalizedEmail, password, user.name);
-    }
+    const token = signCustomerToken(user.id, normalizedEmail || user.email || "user@ms-traders.in");
     res.json({ ...publicUser(user), token, role });
   })
 );

@@ -33,7 +33,7 @@ router.put(
     if (req.user.uid !== req.params.uid && req.user.role !== ROLES.ADMIN) {
       return res.status(403).json({ error: "Forbidden" });
     }
-    const allowed = ["name", "mobile", "defaultAddressId", "gender", "dateOfBirth", "profileImage"];
+    const allowed = ["name", "mobile", "defaultAddressId", "gender", "dateOfBirth", "profileImage", "offerNotificationsEnabled"];
     const update = Object.fromEntries(
       Object.entries(req.body).filter(([k]) => allowed.includes(k))
     );

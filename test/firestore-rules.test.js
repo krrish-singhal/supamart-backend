@@ -102,6 +102,20 @@ test("Firestore Security Rules Suite", async (t) => {
         status: "OUT_FOR_DELIVERY",
         assignedPartnerId: "partner-2",
       });
+
+      // Seed refund for cust-A
+      await db.collection("refunds").doc("ref-1").set({
+        orderId: "order-1",
+        userId: "cust-A",
+        status: "PENDING_APPROVAL",
+      });
+
+      // Seed issue for cust-A
+      await db.collection("issues").doc("issue-1").set({
+        orderId: "order-1",
+        userId: "cust-A",
+        issueType: "Damaged Items",
+      });
     });
   });
 
@@ -221,6 +235,33 @@ test("Firestore Security Rules Suite", async (t) => {
     // Admin can read customer data
     await assertSucceeds(adminDb.collection("users").doc("cust-A").get());
     await assertSucceeds(adminDb.collection("users").doc("cust-A").collection("addresses").doc("addr-A").get());
+  });
+
+  await t.test("Refunds and Issues: customer can read own records, admin can read all, writes denied", async () => {
+    const custADb = testEnv.authenticatedContext("cust-A", { role: "CUSTOMER" }).firestore();
+    const custBDb = testEnv.authenticatedContext("cust-B", { role: "CUSTOMER" }).firestore();
+    const adminDb = testEnv.authenticatedContext("admin-1", { role: "ADMIN" }).firestore();
+    const unauthDb = testEnv.unauthenticatedContext().firestore();
+
+    // Owner can read their refund and issue
+    await assertSucceeds(custADb.collection("refunds").doc("ref-1").get());
+    await assertSucceeds(custADb.collection("issues").doc("issue-1").get());
+
+    // Non-owner cannot read someone else's refund or issue
+    await assertFails(custBDb.collection("refunds").doc("ref-1").get());
+    await assertFails(custBDb.collection("issues").doc("issue-1").get());
+
+    // Unauthenticated cannot read refunds or issues
+    await assertFails(unauthDb.collection("refunds").doc("ref-1").get());
+    await assertFails(unauthDb.collection("issues").doc("issue-1").get());
+
+    // Admin can read all refunds and issues
+    await assertSucceeds(adminDb.collection("refunds").doc("ref-1").get());
+    await assertSucceeds(adminDb.collection("issues").doc("issue-1").get());
+
+    // Client writes are denied (handled safely via backend)
+    await assertFails(custADb.collection("refunds").doc("ref-new").set({ userId: "cust-A", totalRefund: 100 }));
+    await assertFails(custADb.collection("issues").doc("issue-new").set({ userId: "cust-A", issueType: "Other" }));
   });
 
   await t.test("Default deny: unmapped collections are blocked", async () => {

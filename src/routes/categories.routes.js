@@ -64,6 +64,7 @@ router.post(
     }
 
     const catData = { ...req.body, isActive: req.body.isActive === 'true' || req.body.isActive === true };
+    if (req.body.order !== undefined) catData.order = parseInt(req.body.order, 10) || 0;
     if (image) catData.image = image;
 
     const cat = await Categories.create(null, { ...catData, createdAt: now, updatedAt: now });
@@ -87,6 +88,7 @@ router.put(
     }
 
     const updateData = { ...req.body, updatedAt: Date.now() };
+    if (req.body.order !== undefined) updateData.order = parseInt(req.body.order, 10) || 0;
     if (req.body.isActive !== undefined) {
       updateData.isActive = req.body.isActive === 'true' || req.body.isActive === true;
     }

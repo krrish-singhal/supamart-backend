@@ -66,7 +66,17 @@ async function placeOrder({ userId, cartItems, couponCode, address, slot, notes,
       );
       if (idemSnap.exists) {
         const prev = idemSnap.data();
-        return prev; // return the already-created order
+        const existingOrderId = prev.orderId || prev.id;
+        if (existingOrderId) {
+          const prevOrderSnap = await tx.get(db().collection(COLLECTIONS.ORDERS).doc(existingOrderId));
+          if (prevOrderSnap.exists) {
+            const prevOrder = prevOrderSnap.data();
+            // If the previous order was cancelled or failed, do NOT return it as active; allow creating fresh order
+            if (prevOrder.status !== ORDER_STATUS.CANCELLED && prevOrder.paymentStatus !== PAYMENT_STATUS.FAILED) {
+              return { id: existingOrderId, ...prevOrder };
+            }
+          }
+        }
       }
     }
 
@@ -177,6 +187,7 @@ async function placeOrder({ userId, cartItems, couponCode, address, slot, notes,
       status: ORDER_STATUS.PLACED,
       statusHistory: [{ status: ORDER_STATUS.PLACED, at: now }],
       assignedPartnerId: null,
+      idempotencyKey: idempotencyKey || null,
       createdAt: now,
       updatedAt: now,
     };
@@ -212,6 +223,7 @@ async function placeOrder({ userId, cartItems, couponCode, address, slot, notes,
     // idempotency record — TTL via expireAt if Cloud Firestore TTL enabled, else just leave it
     if (idempotencyKey) {
       tx.set(db().collection("orderIdempotency").doc(idempotencyKey), {
+        id: orderRef.id,
         orderId: orderRef.id,
         orderNo,
         userId,
@@ -231,6 +243,13 @@ async function placeOrder({ userId, cartItems, couponCode, address, slot, notes,
 // without hitting "Invalid transition X -> Y". Still always forward, never backward, and
 // CANCELLED is reachable from any non-terminal state.
 function assertValidTransition(from, to) {
+  if (from === ORDER_STATUS.DELIVERED || from === ORDER_STATUS.CANCELLED) {
+    throw Object.assign(
+      new Error(`Order is finalized as ${from} and cannot be modified or reopened`),
+      { statusCode: 422, code: "ORDER_CLOSED" }
+    );
+  }
+
   if (to === ORDER_STATUS.CANCELLED) return true;
   
   if (from === ORDER_STATUS.DELIVERY_DISPUTED) {
@@ -271,6 +290,13 @@ async function updateStatus(orderId, nextStatus, user) {
 
     if (user && user.role === "PARTNER" && nextStatus === ORDER_STATUS.DELIVERED) {
       throw Object.assign(new Error("Partners can only mark orders as PENDING_CONFIRMATION."), { statusCode: 403 });
+    }
+
+    if (order.status === ORDER_STATUS.DELIVERED || order.status === ORDER_STATUS.CANCELLED) {
+      throw Object.assign(
+        new Error(`Order #${order.orderNo || orderId} is closed (${order.status}) and cannot be reopened or edited.`),
+        { statusCode: 422, code: "ORDER_CLOSED" }
+      );
     }
 
     assertValidTransition(order.status, nextStatus);
@@ -326,18 +352,37 @@ async function markPaymentClaimed(orderId, userId) {
     if (!snap.exists) throw Object.assign(new Error("Order not found"), { statusCode: 404 });
     const order = snap.data();
     if (order.userId !== userId) throw Object.assign(new Error("Forbidden"), { statusCode: 403 });
+    if (order.status === ORDER_STATUS.DELIVERED) {
+      throw Object.assign(
+        new Error(`Order is closed (${order.status}) and payment cannot be claimed.`),
+        { statusCode: 422, code: "ORDER_CLOSED" }
+      );
+    }
     if (order.paymentMethod !== PAYMENT_METHOD.UPI_MANUAL) {
       throw Object.assign(new Error("Order is not a UPI order"), { statusCode: 422 });
     }
-    if (order.paymentStatus !== PAYMENT_STATUS.PENDING) {
+    // Allow claiming if payment is PENDING or if user is retrying after a FAILED payment
+    if (order.paymentStatus !== PAYMENT_STATUS.PENDING && order.paymentStatus !== PAYMENT_STATUS.FAILED) {
       throw Object.assign(
         new Error(`Order payment is already ${order.paymentStatus}`),
         { statusCode: 422 }
       );
     }
     const now = Date.now();
-    tx.update(ref, { paymentStatus: PAYMENT_STATUS.AWAITING_CONFIRMATION, updatedAt: now });
-    return { id: orderId, paymentStatus: PAYMENT_STATUS.AWAITING_CONFIRMATION };
+    const updateData = {
+      paymentStatus: PAYMENT_STATUS.AWAITING_CONFIRMATION,
+      paymentRejectionReason: null,
+      updatedAt: now,
+    };
+    if (order.status === ORDER_STATUS.CANCELLED) {
+      updateData.status = ORDER_STATUS.PLACED;
+      updateData.statusHistory = [
+        ...(order.statusHistory || []),
+        { status: ORDER_STATUS.PLACED, at: now, note: "Customer retried payment" },
+      ];
+    }
+    tx.update(ref, updateData);
+    return { id: orderId, paymentStatus: PAYMENT_STATUS.AWAITING_CONFIRMATION, status: updateData.status || order.status };
   });
 }
 
@@ -363,7 +408,19 @@ async function markPaid(orderId) {
     const snap = await tx.get(ref);
     if (!snap.exists) throw Object.assign(new Error("Order not found"), { statusCode: 404 });
     const current = snap.data();
+    if (current.status === ORDER_STATUS.DELIVERED || current.status === ORDER_STATUS.CANCELLED) {
+      throw Object.assign(
+        new Error(`Order #${current.orderNo || orderId} is closed (${current.status}) — payment status cannot be modified.`),
+        { statusCode: 422, code: "ORDER_CLOSED" }
+      );
+    }
     if (current.paymentStatus === PAYMENT_STATUS.PAID) return { ...current, id: orderId, alreadyPaid: true };
+    if (current.paymentStatus === PAYMENT_STATUS.FAILED) {
+      throw Object.assign(
+        new Error("Payment was previously rejected and cannot be modified."),
+        { statusCode: 422, code: "PAYMENT_ALREADY_FAILED" }
+      );
+    }
     const now = Date.now();
     tx.update(ref, { paymentStatus: PAYMENT_STATUS.PAID, updatedAt: now });
     return { ...current, id: orderId, paymentStatus: PAYMENT_STATUS.PAID };
@@ -397,20 +454,62 @@ async function rejectPayment(orderId, reason, customReason) {
     const snap = await tx.get(ref);
     if (!snap.exists) throw Object.assign(new Error("Order not found"), { statusCode: 404 });
     const current = snap.data();
+    if (current.status === ORDER_STATUS.DELIVERED) {
+      throw Object.assign(
+        new Error(`Order #${current.orderNo || orderId} is closed (${current.status}) — payment cannot be rejected.`),
+        { statusCode: 422, code: "ORDER_CLOSED" }
+      );
+    }
     if (current.paymentStatus === PAYMENT_STATUS.PAID) {
       throw Object.assign(new Error("This payment was already confirmed as PAID — it cannot be rejected."), { statusCode: 422 });
     }
-    if (current.status === ORDER_STATUS.CANCELLED) {
-      throw Object.assign(new Error("This order is already cancelled."), { statusCode: 422 });
+    if (current.paymentStatus === PAYMENT_STATUS.FAILED && current.status === ORDER_STATUS.CANCELLED) {
+      return { ...current, id: orderId };
     }
+
+    // Read all products in order to restore stock (reads must come before writes in tx)
+    const productRefs = [...new Set((current.items || []).map((i) => i.productId))].map((id) =>
+      db().collection(COLLECTIONS.PRODUCTS).doc(id)
+    );
+    const productSnaps = await Promise.all(productRefs.map((r) => tx.get(r)));
+    const products = new Map();
+    productSnaps.forEach((s) => {
+      if (s.exists) products.set(s.id, { id: s.id, ...s.data() });
+    });
+
+    // 1. Restore product stock so items are immediately available for repurchase/retry
+    for (const item of current.items || []) {
+      const product = products.get(item.productId);
+      if (!product) continue;
+      const variant = (product.variants || []).find((v) => v.id === item.variantId);
+      if (!variant) continue;
+      variant.stock = (variant.stock || 0) + (item.qty || 1);
+      const totalStock = product.variants.reduce((s, v) => s + (v.stock || 0), 0);
+      const availability = totalStock > 0 ? AVAILABILITY.AVAILABLE : product.availability;
+      const soldCount = Math.max(0, (product.soldCount || 0) - (item.qty || 1));
+      tx.update(db().collection(COLLECTIONS.PRODUCTS).doc(product.id), {
+        variants: product.variants,
+        availability,
+        soldCount,
+        updatedAt: Date.now(),
+      });
+    }
+
+    // 2. Mark order cancelled and payment failed
     const now = Date.now();
     tx.update(ref, {
       paymentStatus: PAYMENT_STATUS.FAILED,
       status: ORDER_STATUS.CANCELLED,
       paymentRejectionReason: reasonText,
-      statusHistory: [...(current.statusHistory || []), { status: ORDER_STATUS.CANCELLED, at: now }],
+      statusHistory: [...(current.statusHistory || []), { status: ORDER_STATUS.CANCELLED, at: now, note: reasonText }],
       updatedAt: now,
     });
+
+    // 3. Clear idempotency record if present so retry won't return stale cancelled order
+    if (current.idempotencyKey) {
+      tx.delete(db().collection("orderIdempotency").doc(current.idempotencyKey));
+    }
+
     return { ...current, id: orderId };
   });
 

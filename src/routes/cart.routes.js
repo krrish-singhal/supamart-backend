@@ -3,8 +3,8 @@ const { asyncHandler } = require("../middleware/error");
 const { authenticate } = require("../middleware/auth");
 const { Carts, Products } = require("../models");
 const { db } = require("../config/firebase");
-const { COLLECTIONS } = require("../config/constants");
 const { priceCart, computeDiscount } = require("../services/pricingService");
+const { COLLECTIONS, AVAILABILITY } = require("../config/constants");
 
 const router = express.Router();
 
@@ -55,7 +55,7 @@ router.get(
     if (cart.couponCode) {
       const snap = await db()
         .collection(COLLECTIONS.OFFERS)
-        .where("code", "==", cart.couponCode)
+        .where("code", "==", String(cart.couponCode).toUpperCase())
         .limit(1)
         .get();
       const offer = snap.empty ? null : { id: snap.docs[0].id, ...snap.docs[0].data() };
@@ -95,6 +95,33 @@ router.put(
     const existing = await Carts.findById(req.user.uid);
     const couponCode = existing ? existing.couponCode : null;
 
+    // Only block new quantities for unavailable items. Customers must still be
+    // able to reduce or remove an item that became unavailable after being added.
+    const existingQtyByKey = new Map(
+      (existing?.items || []).map((item) => [`${item.productId}:${item.variantId}`, Number(item.qty) || 0])
+    );
+    for (const item of items) {
+      const key = `${item.productId}:${item.variantId || "default"}`;
+      const previousQty = existingQtyByKey.get(key) || 0;
+      const requestedQty = Number(item.qty);
+      if (requestedQty <= previousQty) continue;
+
+      const product = await Products.findById(item.productId);
+      const variant = product?.variants?.find((candidate) => candidate.id === (item.variantId || "default"));
+      const unavailable =
+        !product ||
+        product.availability !== AVAILABILITY.AVAILABLE ||
+        product.isAvailableToday === false ||
+        !variant ||
+        (variant.availability && variant.availability !== AVAILABILITY.AVAILABLE) ||
+        Number(variant.stock) < requestedQty;
+      if (unavailable) {
+        const error = new Error(`${product?.name || "This item"} is unavailable or has insufficient stock`);
+        error.statusCode = 409;
+        throw error;
+      }
+    }
+
     await db().collection(COLLECTIONS.CARTS).doc(req.user.uid).set(
       { items, couponCode: couponCode || null, updatedAt: now },
       { merge: false }
@@ -108,13 +135,14 @@ router.patch(
   "/coupon",
   authenticate,
   asyncHandler(async (req, res) => {
-    const { code } = req.body; // null or empty to remove
+    const { code } = req.body;
     const now = Date.now();
+    const cleanCode = code ? String(code).trim().toUpperCase() : null;
     await db()
       .collection(COLLECTIONS.CARTS)
       .doc(req.user.uid)
-      .set({ couponCode: code || null, updatedAt: now }, { merge: true });
-    res.json({ couponCode: code || null });
+      .set({ couponCode: cleanCode, updatedAt: now }, { merge: true });
+    res.json({ couponCode: cleanCode });
   })
 );
 

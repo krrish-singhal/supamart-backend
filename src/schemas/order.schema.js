@@ -68,7 +68,20 @@ const orderSchema = Joi.object({
   // Customer-only "remove from my order history" — never shown to admin/partner, and
   // never actually deletes the order doc (it's still a real business/accounting record).
   hiddenFromUser: Joi.boolean().default(false),
-  assignedPartnerId: Joi.string().allow(null),
+  assignedPartnerId: Joi.string().allow("", null),
+  deliveryPartner: Joi.object({
+    id: Joi.string().allow("", null),
+    name: Joi.string().allow("", null),
+    phone: Joi.string().allow("", null),
+    mobile: Joi.string().allow("", null),
+  }).unknown(true).allow(null),
+  deliveryBoyName: Joi.string().allow("", null),
+  deliveryBoyPhone: Joi.string().allow("", null),
+  partnerLocation: Joi.object({
+    lat: Joi.number().allow(null),
+    lng: Joi.number().allow(null),
+    updatedAt: Joi.number().allow(null),
+  }).unknown(true).allow(null),
   deliveryRating: Joi.number().min(1).max(5).allow(null),
   deliveryReview: Joi.string().allow("", null),
   createdAt: Joi.number().required(),

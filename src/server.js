@@ -20,6 +20,8 @@ const configRoutes = require("./routes/config.routes");
 const orderRoutes = require("./routes/orders.routes");
 const deliveryPartnersRoutes = require("./routes/deliveryPartners.routes");
 const notificationsRoutes = require("./routes/notifications.routes");
+const refundsRoutes = require("./routes/refunds.routes");
+const issuesRoutes = require("./routes/issues.routes");
 const adminRoutes = require("./routes/admin.routes");
 const pagesRoutes = require("./routes/pages.routes");
 
@@ -53,6 +55,8 @@ app.use("/api/cart", cartRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/delivery-partners", deliveryPartnersRoutes);
 app.use("/api/notifications", notificationsRoutes);
+app.use("/api/refunds", refundsRoutes);
+app.use("/api/issues", issuesRoutes);
 
 // Admin-only endpoints
 app.use("/api/admin", adminRoutes);

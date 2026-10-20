@@ -13,6 +13,8 @@ const COLLECTIONS = {
   CONFIG: "config",
   METRICS: "metrics",
   BRANDS: "brands",
+  REFUNDS: "refunds",
+  ISSUES: "issues",
 };
 
 // Collapsed to a 4-step flow (+ CANCELLED, always reachable) for a one-shop/one-rider
@@ -69,6 +71,18 @@ const OFFER_SCOPE = { CART: "CART", CATEGORY: "CATEGORY", PRODUCT: "PRODUCT" };
 
 const ROLES = { CUSTOMER: "CUSTOMER", ADMIN: "ADMIN", PARTNER: "PARTNER" };
 
+const REFUND_STATUS = {
+  PENDING_APPROVAL: "PENDING_APPROVAL",
+  REFUND_GRANTED: "REFUND_GRANTED",
+  REJECTED: "REJECTED",
+};
+
+const ISSUE_STATUS = {
+  OPEN: "OPEN",
+  RESOLVED: "RESOLVED",
+  REJECTED: "REJECTED",
+};
+
 module.exports = {
   COLLECTIONS,
   ORDER_STATUS,
@@ -83,4 +97,6 @@ module.exports = {
   OFFER_KIND,
   OFFER_SCOPE,
   ROLES,
+  REFUND_STATUS,
+  ISSUE_STATUS,
 };

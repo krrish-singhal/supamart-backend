@@ -31,6 +31,12 @@ function priceCart(cartItems, products) {
       variantLabel: variant.label,
       qty: ci.qty,
       price: unit,
+      images: product.images || [],
+      image: (product.images && product.images[0]) || "",
+      availability: product.availability || "AVAILABLE",
+      isAvailableToday: product.isAvailableToday !== false,
+      variantAvailability: variant.availability || "AVAILABLE",
+      stock: variant.stock,
     };
   });
   return { items, subtotal: Number(subtotal.toFixed(2)) };

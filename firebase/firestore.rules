@@ -54,15 +54,33 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // ── Refunds: customer can read their own refund requests; admin can read all. ──
+    match /refunds/{id} {
+      allow read: if isSignedIn() && (
+        isAdmin() ||
+        (('userId' in resource.data) && resource.data.userId == request.auth.uid)
+      );
+      allow write: if false;
+    }
+
+    // ── Issues / Reports: customer can read their own reports; admin can read all. ──
+    match /issues/{id} {
+      allow read: if isSignedIn() && (
+        isAdmin() ||
+        (('userId' in resource.data) && resource.data.userId == request.auth.uid)
+      );
+      allow write: if false;
+    }
+
     // ── Metrics: admin read; written by backend only. ──
     match /metrics/{doc=**} {
       allow read: if isAdmin();
       allow write: if false;
     }
 
-    // ── Delivery partners: self read; admin all; no client write. ──
+    // ── Delivery partners: authenticated read (for live tracking); admin all; no client write. ──
     match /deliveryPartners/{uid} {
-      allow read: if isOwner(uid) || isAdmin();
+      allow read: if isAuthenticated();
       allow write: if false;
     }
 
