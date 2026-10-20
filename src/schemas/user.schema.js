@@ -30,7 +30,13 @@ const addressSchema = Joi.object({
   floor: Joi.string().max(50).allow("", null),
   street: Joi.string().min(1).max(160).required(),
   landmark: Joi.string().max(160).allow("", null),
-  pincode: Joi.string().pattern(/^[0-9]{6}$/).required(),
+  // GPS-only addresses may not have a postal code from reverse geocoding. The
+  // manual address form still requires a valid PIN before it submits.
+  pincode: Joi.string().pattern(/^[0-9]{6}$/).allow("").required(),
+  area: Joi.string().max(160).allow("", null),
+  city: Joi.string().max(100).allow("", null),
+  receiverName: Joi.string().max(80).allow("", null),
+  receiverPhone: Joi.string().max(20).allow("", null),
   lat: Joi.number().min(-90).max(90).required(),
   lng: Joi.number().min(-180).max(180).required(),
   isDefault: Joi.boolean().default(false),
