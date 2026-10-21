@@ -1,3 +1,4 @@
+const { STORE_LOCATION, SERVICE_RADIUS_KM } = require('../config/deliveryArea');
 require("dotenv").config();
 const { db } = require("../config/firebase");
 const { COLLECTIONS } = require("../config/constants");
@@ -27,9 +28,13 @@ async function seed() {
 
   await firestore.collection(COLLECTIONS.CONFIG).doc("global").set(
     {
-      storeLat: Number(process.env.STORE_LATITUDE) || 28.6139,
-      storeLng: Number(process.env.STORE_LONGITUDE) || 77.209,
-      serviceRadiusKm: Number(process.env.SERVICE_RADIUS_KM) || 5,
+      storeAddress: STORE_LOCATION.address,
+      storePlusCode: STORE_LOCATION.plusCode,
+      storeMapsUrl: STORE_LOCATION.mapsUrl,
+      distanceMethod: 'straight-line',
+      storeLat: STORE_LOCATION.lat,
+      storeLng: STORE_LOCATION.lng,
+      serviceRadiusKm: SERVICE_RADIUS_KM,
       minOrderValue: 200,
       taxPercent: 0,
       deliveryTiers: [

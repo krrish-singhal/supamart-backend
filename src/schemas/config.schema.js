@@ -1,6 +1,7 @@
+const { STORE_LOCATION, SERVICE_RADIUS_KM } = require('../config/deliveryArea');
 const Joi = require("joi");
 
-// config/global  — single source of truth for tunable business rules
+// config/global — tunable business rules plus the fixed delivery-area policy
 const deliveryTierSchema = Joi.object({
   maxKm: Joi.number().min(0).required(),
   charge: Joi.number().min(0).required(),
@@ -14,9 +15,9 @@ const slotSchema = Joi.object({
 });
 
 const configSchema = Joi.object({
-  storeLat: Joi.number().required(),
-  storeLng: Joi.number().required(),
-  serviceRadiusKm: Joi.number().min(0).default(5),
+  storeLat: Joi.number().valid(STORE_LOCATION.lat).required(),
+  storeLng: Joi.number().valid(STORE_LOCATION.lng).required(),
+  serviceRadiusKm: Joi.number().valid(SERVICE_RADIUS_KM).default(SERVICE_RADIUS_KM),
   minOrderValue: Joi.number().min(0).default(200),
   taxPercent: Joi.number().min(0).max(100).default(0),
   deliveryTiers: Joi.array().items(deliveryTierSchema).min(1).required(),

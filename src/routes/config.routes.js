@@ -1,3 +1,4 @@
+const { withDeliveryArea } = require('../config/deliveryArea');
 const express = require("express");
 const { asyncHandler } = require("../middleware/error");
 const { authenticate, requireRole } = require("../middleware/auth");
@@ -21,7 +22,7 @@ router.get(
     }
     const snap = await db().collection(COLLECTIONS.CONFIG).doc("global").get();
     if (!snap.exists) return res.status(503).json({ error: "Config not initialized. Run npm run seed." });
-    cache = { id: snap.id, ...snap.data() };
+    cache = withDeliveryArea({ id: snap.id, ...snap.data() });
     cacheAt = Date.now();
     res.json(cache);
   })
@@ -39,16 +40,16 @@ router.put(
       e.statusCode = 404;
       throw e;
     }
-    const merged = { ...snap.data(), ...req.body, updatedAt: Date.now() };
+    const merged = { ...withDeliveryArea(snap.data()), ...req.body, updatedAt: Date.now() };
     const { error, value } = configSchema.validate(merged, { abortEarly: false });
     if (error) {
       const e = new Error("Validation failed: " + error.details.map((d) => d.message).join("; "));
       e.statusCode = 422;
       throw e;
     }
-    await db().collection(COLLECTIONS.CONFIG).doc("global").set(value);
+    await db().collection(COLLECTIONS.CONFIG).doc("global").set(withDeliveryArea(value));
     cache = null; // invalidate cache
-    res.json(value);
+    res.json(withDeliveryArea(value));
   })
 );
 

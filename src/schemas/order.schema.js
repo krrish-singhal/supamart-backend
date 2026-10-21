@@ -35,8 +35,8 @@ const addressSnapshotSchema = Joi.object({
   street: Joi.string().required(),
   landmark: Joi.string().allow("", null),
   pincode: Joi.string().required(),
-  lat: Joi.number().required(),
-  lng: Joi.number().required(),
+  lat: Joi.number().min(-90).max(90).required(),
+  lng: Joi.number().min(-180).max(180).required(),
 });
 
 const statusEventSchema = Joi.object({

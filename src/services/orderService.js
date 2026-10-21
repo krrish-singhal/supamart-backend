@@ -1,3 +1,4 @@
+const { validCoordinates, withDeliveryArea } = require('../config/deliveryArea');
 const { db } = require("../config/firebase");
 const dayjs = require("dayjs");
 const {
@@ -22,7 +23,7 @@ async function getConfig(tx) {
   const ref = db().collection(COLLECTIONS.CONFIG).doc("global");
   const snap = tx ? await tx.get(ref) : await ref.get();
   if (!snap.exists) throw Object.assign(new Error("Config missing"), { statusCode: 500 });
-  return { ref, data: snap.data() };
+  return { ref, data: withDeliveryArea(snap.data()) };
 }
 
 /**
@@ -41,6 +42,12 @@ async function placeOrder({ userId, cartItems, couponCode, address, slot, notes,
       new Error("Cash on Delivery is no longer available. Please pay via UPI."),
       { statusCode: 422, code: "COD_DISCONTINUED" }
     );
+  }
+
+  if (!address || !validCoordinates(address.lat, address.lng)) {
+    throw Object.assign(new Error('Select a delivery address with valid map coordinates.'), {
+      statusCode: 422, code: 'INVALID_DELIVERY_LOCATION',
+    });
   }
 
   // Resolve coupon OUTSIDE the transaction (Admin SDK tx.get() only accepts doc refs, not queries)
@@ -82,6 +89,14 @@ async function placeOrder({ userId, cartItems, couponCode, address, slot, notes,
 
     const { ref: cfgRef, data: config } = await getConfig(tx);
 
+    // Check the actual address before stock/price work or any transaction writes.
+    const geo = evaluateDelivery(config, address.lat, address.lng);
+    if (!geo.withinRadius) {
+      throw Object.assign(new Error('Delivery is available only within 5 km of our Menamkulam shop, including exactly 5 km.'), {
+        statusCode: 422, code: 'OUT_OF_SERVICE',
+      });
+    }
+
     // load products in cart (batch tx.get — no N+1)
     const productRefs = [...new Set(cartItems.map((i) => i.productId))].map((id) =>
       db().collection(COLLECTIONS.PRODUCTS).doc(id)
@@ -119,14 +134,8 @@ async function placeOrder({ userId, cartItems, couponCode, address, slot, notes,
       );
     }
 
-    // geo / radius — delivery charge depends on subtotal (free above FREE_DELIVERY_THRESHOLD)
-    const geo = evaluateDelivery(config, address.lat, address.lng, subtotal);
-    if (!geo.withinRadius) {
-      throw Object.assign(new Error("Delivery currently unavailable in your area."), {
-        statusCode: 422,
-        code: "OUT_OF_SERVICE",
-      });
-    }
+    // Apply the same distance-based delivery tiers after repricing the cart.
+    geo.deliveryCharge = evaluateDelivery(config, address.lat, address.lng, subtotal).deliveryCharge;
 
     // coupon — re-read inside tx using doc ref for consistency
     let discount = 0;

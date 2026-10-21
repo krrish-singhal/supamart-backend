@@ -1,0 +1,13 @@
+# MS Traders delivery area
+
+The shop location comes from the supplied address: HV76+F39, Menamkulam, Thiruvananthapuram, Menamkulam, Keralam 695582. The full Plus Code is **6JWRHV76+F39**; its centre is **8.5636625, 76.860234375**. This was decoded with Google's Open Location Code implementation using Menamkulam as the reference locality. The supplied share link is retained as metadata: https://share.google/HufMXvVSvLv6chNM5.
+
+Orders are eligible when the saved delivery pin is at most **5 km in a straight line** from this point. Road-route length and rounded display distances do not determine eligibility. A one-micrometre numerical tolerance absorbs floating-point error at exactly 5 km; it is not an additional service allowance. GPS accuracy depends on the delivery pin/device; the app requests the highest available location accuracy and never invents coordinates when GPS is unavailable.
+
+`src/config/deliveryArea.js` is the canonical policy. Run `npm run sync:delivery-area` after editing it to generate the identical customer module. Regression tests verify that the copies match. Public config responses override stale stored origins/radii with this policy. Order creation enforces it independently of any client/config radius, before stock/order writes; missing, nonnumeric or out-of-range coordinates are rejected. Admin settings show the address, coordinates and inclusive radius as read-only, and backend settings validation rejects changes to them. Existing delivery tiers and free-delivery thresholds remain in effect.
+
+Verification: `npm run test:delivery` covers 72 bearings at eight distances (including exactly 5 km and 1 mm beyond), invalid coordinates, fee boundaries, app/backend parity, stale/expanded config, the real order service with in-memory transactions, and public/admin config handlers. `npm test` also runs the existing backend regression suites. No live orders or live database records are created by these tests.
+
+Rollout requires deploying the backend for enforcement, updating the customer app for matching checkout/location behaviour, and deploying the admin portal for the read-only settings. Existing stored address pins are not geocoded or silently moved; users must correct inaccurate pins themselves. Do not run the general seed job on a populated store solely to update the delivery location: it also replaces categories. Existing config documents need no migration because the backend applies the canonical policy on read.
+
+Validation completed: 28 backend tests passed (including eight delivery-policy tests), the admin production build passed, and Android/iOS production exports passed. All 193 source files parsed successfully.

@@ -11,8 +11,10 @@
     "seed:products": "node src/jobs/seedProducts.js",
     "seed:brands": "node src/jobs/seedBrands.js",
     "create:admin": "node src/jobs/createAdmin.js",
-    "test": "node --test test/account-deletion.test.js test/account-deletion-api.test.js test/app-regression.test.js",
-    "test:rules": "JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 PATH=/usr/lib/jvm/java-21-openjdk-amd64/bin:$PATH firebase emulators:exec --only firestore \"node --test test/firestore-rules.test.js\""
+    "test": "node --test test/account-deletion.test.js test/account-deletion-api.test.js test/app-regression.test.js test/delivery-area.test.js",
+    "test:rules": "JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 PATH=/usr/lib/jvm/java-21-openjdk-amd64/bin:$PATH firebase emulators:exec --only firestore \"node --test test/firestore-rules.test.js\"",
+    "sync:delivery-area": "node scripts/sync-delivery-area.js",
+    "test:delivery": "node --test test/delivery-area.test.js"
   },
   "engines": {
     "node": ">=20"
