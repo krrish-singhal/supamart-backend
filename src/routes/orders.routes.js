@@ -192,11 +192,25 @@ router.get('/buy-again', authenticate, asyncHandler(async (req, res) => {
 router.patch('/:id/ratings', authenticate, asyncHandler(async (req, res) => {
   const { validateOrderRatings } = require('../services/customerFeatures');
   const ref = db().collection(COLLECTIONS.ORDERS).doc(req.params.id);
+  const now = Date.now();
   const result = await db().runTransaction(async tx => {
     const snap = await tx.get(ref);
-    const value = validateOrderRatings(snap.exists ? snap.data() : null, req.user.uid, req.body);
-    const ratings = { ...value, ratedAt: Date.now() };
-    tx.update(ref, { ratings, updatedAt: Date.now() });
+    const orderData = snap.exists ? snap.data() : null;
+    const value = validateOrderRatings(orderData, req.user.uid, req.body);
+    const ratings = { ...value, ratedAt: now };
+    const updatePayload = { ratings, updatedAt: now };
+    if (orderData && orderData.status === ORDER_STATUS.PENDING_CONFIRMATION) {
+      updatePayload.status = ORDER_STATUS.DELIVERED;
+      updatePayload.confirmedAt = now;
+      updatePayload.deliveryRating = value.orderRating || null;
+      updatePayload.deliveryReview = value.review || null;
+      updatePayload.statusHistory = [...(orderData.statusHistory || []), { status: ORDER_STATUS.DELIVERED, at: now, note: "Confirmed & rated by customer" }];
+      const inc = require("firebase-admin").firestore.FieldValue.increment;
+      const dayId = require("dayjs")(orderData.createdAt).format("YYYY-MM-DD");
+      const dayRef = db().collection(COLLECTIONS.METRICS).doc("daily").collection("days").doc(dayId);
+      tx.set(dayRef, { delivered: inc(1), pending: inc(-1), updatedAt: now }, { merge: true });
+    }
+    tx.update(ref, updatePayload);
     return ratings;
   });
   res.json(result);
@@ -271,8 +285,8 @@ router.patch(
   "/:id/confirm-delivery",
   authenticate,
   asyncHandler(async (req, res) => {
-    const { rating, review } = req.body;
-    const result = await confirmDelivery(req.params.id, req.user.uid, rating, review);
+    const { rating, review, ratings } = req.body;
+    const result = await confirmDelivery(req.params.id, req.user.uid, rating, review, ratings || req.body);
     res.json(result);
   })
 );
@@ -409,25 +423,173 @@ router.patch(
     const partnerId = req.body.partnerId || null;
     let partnerData = null;
     if (partnerId) {
-      try {
-        const p = await DeliveryPartners.findById(partnerId);
-        if (p) {
-          partnerData = {
-            id: partnerId,
-            name: p.name || "",
-            phone: p.phone || p.mobile || "",
-          };
-        }
-      } catch (_) {}
+      const p = await DeliveryPartners.findById(partnerId);
+      if (!p) {
+        return res.status(404).json({ error: "Delivery partner not found" });
+      }
+      // Verify partner is ON DUTY
+      if (p.isOnDuty === false || p.isActive === false) {
+        return res.status(422).json({
+          error: `${p.name || "Delivery partner"} is currently off duty and cannot receive orders at real time.`,
+          code: "PARTNER_OFF_DUTY",
+        });
+      }
+      partnerData = {
+        id: partnerId,
+        name: p.name || "",
+        phone: p.phone || p.mobile || "",
+      };
     }
     const updatePayload = {
       assignedPartnerId: partnerId,
       deliveryPartner: partnerData,
       deliveryBoyName: partnerData ? partnerData.name : null,
       deliveryBoyPhone: partnerData ? partnerData.phone : null,
+      deliveryAcceptanceStatus: partnerId ? "PENDING" : null,
       updatedAt: Date.now(),
     };
     const updated = await Orders.update(req.params.id, updatePayload);
+
+    if (partnerId) {
+      notifyUser(
+        partnerId,
+        "New Delivery Assigned",
+        `Order #${order.orderNo || req.params.id.slice(-4)} has been assigned to you. Open app to accept or reject.`,
+        { type: "ORDER_ASSIGNED", orderId: req.params.id }
+      ).catch((e) => console.error(e));
+    }
+
+    res.json(updated);
+  })
+);
+
+// PATCH /api/orders/:id/accept-assignment (delivery partner accepts assigned order)
+router.patch(
+  "/:id/accept-assignment",
+  authenticate,
+  requireRole(ROLES.PARTNER, ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const order = await Orders.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (req.user.role === ROLES.PARTNER && order.assignedPartnerId !== req.user.uid) {
+      return res.status(403).json({ error: "Forbidden: Order not assigned to you" });
+    }
+    const now = Date.now();
+    const updatePayload = {
+      deliveryAcceptanceStatus: "ACCEPTED",
+      status: ORDER_STATUS.OUT_FOR_DELIVERY,
+      statusHistory: [
+        ...(order.statusHistory || []),
+        { status: ORDER_STATUS.OUT_FOR_DELIVERY, at: now, note: "Partner accepted delivery" },
+      ],
+      updatedAt: now,
+    };
+    const updated = await Orders.update(req.params.id, updatePayload);
+
+    // Notify customer that delivery boy is on the way
+    notifyUser(
+      order.userId,
+      "Order on the way!",
+      `Your order #${order.orderNo} has been accepted by ${order.deliveryBoyName || "your delivery partner"} and is on its way.`,
+      { type: "ORDER_STATUS", status: ORDER_STATUS.OUT_FOR_DELIVERY, orderId: req.params.id }
+    ).catch((e) => console.error(e));
+
+    res.json(updated);
+  })
+);
+
+// PATCH /api/orders/:id/reject-assignment (delivery partner rejects assigned order)
+router.patch(
+  "/:id/reject-assignment",
+  authenticate,
+  requireRole(ROLES.PARTNER, ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const order = await Orders.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (req.user.role === ROLES.PARTNER && order.assignedPartnerId !== req.user.uid) {
+      return res.status(403).json({ error: "Forbidden: Order not assigned to you" });
+    }
+    const now = Date.now();
+    const updatePayload = {
+      deliveryAcceptanceStatus: "REJECTED",
+      updatedAt: now,
+    };
+    const updated = await Orders.update(req.params.id, updatePayload);
+    res.json(updated);
+  })
+);
+
+// PATCH /api/orders/:id/delivery-delay (delivery partner reports delay with reason & new delivery time)
+router.patch(
+  "/:id/delivery-delay",
+  authenticate,
+  requireRole(ROLES.PARTNER, ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const order = await Orders.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (req.user.role === ROLES.PARTNER && order.assignedPartnerId !== req.user.uid) {
+      return res.status(403).json({ error: "Forbidden: Order not assigned to you" });
+    }
+
+    const { newEstimatedTime, delayReason } = req.body;
+    if (!newEstimatedTime || !delayReason || !String(delayReason).trim()) {
+      return res.status(422).json({
+        error: "Both new delivery time and delay reason are mandatory.",
+      });
+    }
+
+    const cleanReason = String(delayReason).trim();
+    const now = Date.now();
+
+    // Parse new estimated time if possible into timestamp, or keep string
+    let newEtaTimestamp = now + 30 * 60000;
+    if (typeof newEstimatedTime === "number") {
+      newEtaTimestamp = newEstimatedTime;
+    } else if (typeof newEstimatedTime === "string") {
+      const matchMins = newEstimatedTime.match(/(\d+)\s*min/i);
+      if (matchMins) {
+        newEtaTimestamp = now + parseInt(matchMins[1], 10) * 60000;
+      }
+    }
+
+    const updatePayload = {
+      delayReason: cleanReason,
+      delayReportedAt: now,
+      deliveryDelay: {
+        newEstimatedTime: String(newEstimatedTime),
+        delayReason: cleanReason,
+        reportedAt: now,
+      },
+      estimatedDeliveryAt: newEtaTimestamp,
+      updatedAt: now,
+    };
+
+    const updated = await Orders.update(req.params.id, updatePayload);
+
+    // 1. Auto-shoot email to customer (mandatory default task)
+    const { sendDeliveryDelayEmail } = require("../services/emailService");
+    if (order.userEmail) {
+      sendDeliveryDelayEmail(order.userEmail, {
+        orderNo: order.orderNo,
+        customerName: order.userName || "Customer",
+        newEstimatedTime: String(newEstimatedTime),
+        delayReason: cleanReason,
+      }).catch((err) => console.error("Auto delay email failed:", err));
+    }
+
+    // 2. Real-time in-app notification & push to customer
+    notifyUser(
+      order.userId,
+      `Delivery Update: Order #${order.orderNo}`,
+      `Your order is delayed due to: ${cleanReason}. Expected delivery: ${newEstimatedTime}.`,
+      {
+        type: "DELIVERY_DELAY",
+        orderId: req.params.id,
+        delayReason: cleanReason,
+        newEstimatedTime: String(newEstimatedTime),
+      }
+    ).catch((err) => console.error("Delay notifyUser error:", err));
+
     res.json(updated);
   })
 );

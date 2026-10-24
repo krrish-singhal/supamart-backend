@@ -95,6 +95,16 @@ const orderSchema = Joi.object({
   deliveryInstructions: Joi.any().allow(null),
   deliveryRating: Joi.number().min(1).max(5).allow(null),
   deliveryReview: Joi.string().allow("", null),
+  deliveryAcceptanceStatus: Joi.string().valid("PENDING", "ACCEPTED", "REJECTED").allow(null),
+  delayReason: Joi.string().allow("", null),
+  delayReportedAt: Joi.number().allow(null),
+  deliveryDelay: Joi.object({
+    newEstimatedTime: Joi.any().allow(null),
+    delayReason: Joi.string().allow("", null),
+    reportedAt: Joi.number().allow(null),
+  }).unknown(true).allow(null),
+  lastSyncedAt: Joi.number().allow(null),
+  confirmedAt: Joi.number().allow(null),
   createdAt: Joi.number().required(),
   updatedAt: Joi.number().required(),
 });
@@ -124,6 +134,8 @@ const deliveryPartnerSchema = Joi.object({
   email: Joi.string().email().required(),
   mobile: Joi.string().pattern(/^[0-9]{10}$/).required(),
   isActive: Joi.boolean().default(true),
+  isOnDuty: Joi.boolean().default(true),
+  dutyStatus: Joi.string().allow("", null),
   fcmTokens: Joi.array().items(Joi.string()).default([]),
   currentOrders: Joi.array().items(Joi.string()).default([]),
   currentLocation: Joi.object({
@@ -131,6 +143,8 @@ const deliveryPartnerSchema = Joi.object({
     lng: Joi.number().required(),
     updatedAt: Joi.number().required(),
   }).allow(null).default(null),
+  lastSyncedAt: Joi.number().allow(null),
+  updatedAt: Joi.number().allow(null),
   createdAt: Joi.number().required(),
 });
 

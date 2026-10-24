@@ -36,4 +36,28 @@ function sendCode(to, otp, deletion) {
   const content = `<div style="text-align:center;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:12px;padding:22px 8px;font-size:34px;letter-spacing:8px;font-weight:bold;color:#047857">${escape(otp)}</div>`;
   return deliver(to, `MS Traders — ${title}`, renderEmail(title, description, content, footnote), `${title}\n\n${description}\n\n${otp}\n\n${footnote}\n\nNever share this code. If you did not request this, ignore this email.`);
 }
-module.exports = { sendOTPEmail: (to, otp) => sendCode(to, otp, false), sendDeleteAccountOTPEmail: (to, otp) => sendCode(to, otp, true), renderEmail };
+
+function sendDeliveryDelayEmail(to, { orderNo, customerName, newEstimatedTime, delayReason }) {
+  if (!to) return Promise.resolve({ delivered: false });
+  const title = `Delivery Update: Order #${orderNo}`;
+  const greeting = customerName ? `Hello ${customerName},` : 'Hello,';
+  const description = `${greeting} your delivery partner has reported a short delay with your order delivery.`;
+  const content = `
+    <div style="background:#fffbeb;border:1px solid #fef3c7;border-radius:12px;padding:18px 20px;margin-bottom:18px">
+      <p style="margin:0 0 8px;font-size:13px;color:#92400e;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px">Reason for Delay</p>
+      <div style="margin:0 0 16px;font-size:15px;color:#78350f;background:#ffffff;padding:12px 14px;border-radius:8px;border:1px solid #fde68a;font-weight:600">${escape(delayReason)}</div>
+      <p style="margin:0 0 8px;font-size:13px;color:#92400e;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px">New Estimated Delivery</p>
+      <div style="margin:0;font-size:20px;font-weight:bold;color:#047857">${escape(newEstimatedTime)}</div>
+    </div>
+  `;
+  const footnote = 'We appreciate your patience while our delivery partner safely reaches your doorstep.';
+  const text = `${title}\n\n${description}\n\nReason: ${delayReason}\nNew estimated delivery: ${newEstimatedTime}\n\n${footnote}`;
+  return deliver(to, `MS Traders — ${title}`, renderEmail(title, description, content, footnote), text);
+}
+
+module.exports = {
+  sendOTPEmail: (to, otp) => sendCode(to, otp, false),
+  sendDeleteAccountOTPEmail: (to, otp) => sendCode(to, otp, true),
+  sendDeliveryDelayEmail,
+  renderEmail,
+};

@@ -104,6 +104,28 @@ router.put(
   })
 );
 
+// PATCH /api/delivery-partners/:uid/duty — partner or admin toggles duty status
+router.patch(
+  "/:uid/duty",
+  authenticate,
+  asyncHandler(async (req, res) => {
+    if (req.user.uid !== req.params.uid && req.user.role !== ROLES.ADMIN) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const { isOnDuty } = req.body;
+    const dutyVal = typeof isOnDuty === "boolean" ? isOnDuty : true;
+    const now = Date.now();
+    const update = {
+      isOnDuty: dutyVal,
+      isActive: dutyVal,
+      dutyStatus: dutyVal ? "ON_DUTY" : "OFF_DUTY",
+      updatedAt: now,
+    };
+    const updated = await DeliveryPartners.update(req.params.uid, update);
+    res.json(updated);
+  })
+);
+
 // PATCH /api/delivery-partners/:uid/location — partner updates their location
 router.patch(
   "/:uid/location",
@@ -122,16 +144,18 @@ router.patch(
         lat,
         lng,
         updatedAt: now,
-      }
+      },
+      lastSyncedAt: now,
+      updatedAt: now,
     };
     const updated = await DeliveryPartners.update(req.params.uid, update);
 
-    // Sync to active order(s) so customer gets live coordinates in real-time
+    // Sync to active order(s) so customer & admin get live coordinates in real-time
     try {
       const activeOrdersSnap = await db()
         .collection(COLLECTIONS.ORDERS)
         .where("assignedPartnerId", "==", req.params.uid)
-        .where("status", "in", [ORDER_STATUS.OUT_FOR_DELIVERY, ORDER_STATUS.ORDER_ACCEPTED])
+        .where("status", "in", [ORDER_STATUS.OUT_FOR_DELIVERY, ORDER_STATUS.ORDER_ACCEPTED, ORDER_STATUS.PLACED])
         .get();
 
       if (!activeOrdersSnap.empty) {
@@ -139,6 +163,7 @@ router.patch(
         activeOrdersSnap.docs.forEach((d) => {
           batch.update(d.ref, {
             partnerLocation: { lat, lng, updatedAt: now },
+            lastSyncedAt: now,
             updatedAt: now,
           });
         });

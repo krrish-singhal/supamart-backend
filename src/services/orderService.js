@@ -541,7 +541,7 @@ async function rejectPayment(orderId, reason, customReason) {
   return { id: orderId, paymentStatus: PAYMENT_STATUS.FAILED, status: ORDER_STATUS.CANCELLED, paymentRejectionReason: reasonText };
 }
 
-async function confirmDelivery(orderId, userId, rating, review) {
+async function confirmDelivery(orderId, userId, rating, review, ratingsData) {
   const ref = db().collection(COLLECTIONS.ORDERS).doc(orderId);
   const order = await db().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
@@ -551,25 +551,40 @@ async function confirmDelivery(orderId, userId, rating, review) {
     if (orderData.userId !== userId) {
       throw Object.assign(new Error("Forbidden"), { statusCode: 403 });
     }
-    if (orderData.status !== ORDER_STATUS.PENDING_CONFIRMATION) {
+    if (orderData.status !== ORDER_STATUS.PENDING_CONFIRMATION && orderData.status !== ORDER_STATUS.DELIVERED) {
       throw Object.assign(new Error("Order is not pending confirmation"), { statusCode: 422 });
     }
 
     const now = Date.now();
-    tx.update(ref, {
+    const updatePayload = {
       status: ORDER_STATUS.DELIVERED,
-      deliveryRating: rating || null,
-      deliveryReview: review || null,
-      statusHistory: [...orderData.statusHistory, { status: ORDER_STATUS.DELIVERED, at: now }],
+      confirmedAt: now,
+      deliveryRating: rating || ratingsData?.orderRating || null,
+      deliveryReview: review || ratingsData?.review || null,
       updatedAt: now,
-    });
+    };
 
-    const inc = require("firebase-admin").firestore.FieldValue.increment;
-    const dayId = dayjs(orderData.createdAt).format("YYYY-MM-DD");
-    const dayRef = db().collection(COLLECTIONS.METRICS).doc("daily").collection("days").doc(dayId);
-    tx.set(dayRef, { delivered: inc(1), pending: inc(-1), updatedAt: now }, { merge: true });
+    if (ratingsData) {
+      updatePayload.ratings = {
+        orderRating: ratingsData.orderRating || rating || 5,
+        review: ratingsData.review || review || "",
+        deliveryFeedback: ratingsData.deliveryFeedback || null,
+        productRatings: ratingsData.productRatings || [],
+        ratedAt: now,
+      };
+    }
 
-    return { ...orderData, id: orderId, status: ORDER_STATUS.DELIVERED };
+    if (orderData.status !== ORDER_STATUS.DELIVERED) {
+      updatePayload.statusHistory = [...(orderData.statusHistory || []), { status: ORDER_STATUS.DELIVERED, at: now, note: "Confirmed by customer" }];
+      const inc = require("firebase-admin").firestore.FieldValue.increment;
+      const dayId = dayjs(orderData.createdAt).format("YYYY-MM-DD");
+      const dayRef = db().collection(COLLECTIONS.METRICS).doc("daily").collection("days").doc(dayId);
+      tx.set(dayRef, { delivered: inc(1), pending: inc(-1), updatedAt: now }, { merge: true });
+    }
+
+    tx.update(ref, updatePayload);
+
+    return { ...orderData, ...updatePayload, id: orderId };
   });
 
   const notification = STATUS_NOTIFICATION[ORDER_STATUS.DELIVERED];

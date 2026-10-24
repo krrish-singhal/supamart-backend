@@ -21,9 +21,32 @@ router.get(
     if (cache && Date.now() - cacheAt < CACHE_TTL_MS) {
       return res.json({ ...cache, serverTime: Date.now(), storeStatus: storeStatus() });
     }
-    const snap = await db().collection(COLLECTIONS.CONFIG).doc("global").get();
-    if (!snap.exists) return res.status(503).json({ error: "Config not initialized. Run npm run seed." });
-    cache = withStoreHours(withDeliveryArea({ id: snap.id, ...snap.data() }));
+    try {
+      const snap = await db().collection(COLLECTIONS.CONFIG).doc("global").get();
+      if (snap.exists) {
+        cache = withStoreHours(withDeliveryArea({ id: snap.id, ...snap.data() }));
+        cacheAt = Date.now();
+        return res.json({ ...cache, serverTime: Date.now(), storeStatus: storeStatus() });
+      }
+    } catch (err) {
+      console.warn("Firestore error in /api/config:", err.message);
+      if (cache) {
+        return res.json({ ...cache, serverTime: Date.now(), storeStatus: storeStatus() });
+      }
+    }
+
+    // Fallback default config if Firestore is empty or quota is exhausted
+    const fallback = withStoreHours(withDeliveryArea({
+      id: "global",
+      minOrderValue: 200,
+      taxPercent: 0,
+      slots: [],
+      deliveryMode: 'ON_DEMAND',
+      storeHours: { opensAt: '10:00', closesAt: '23:00', timeZone: 'Asia/Kolkata' },
+      orderSeq: 1000,
+      updatedAt: Date.now(),
+    }));
+    cache = fallback;
     cacheAt = Date.now();
     res.json({ ...cache, serverTime: Date.now(), storeStatus: storeStatus() });
   })

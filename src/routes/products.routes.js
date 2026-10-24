@@ -51,45 +51,54 @@ router.get(
   asyncHandler(async (req, res) => {
     const { categoryId, brandId, availability, featured, trending, bestseller, monthlyStockUp, limit = 20, cursor } = req.query;
     const where = [];
-    if (categoryId) {
-      const catSnap = await db().collection(COLLECTIONS.CATEGORIES).get();
-      const allCats = catSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      const targetIds = [categoryId];
-      // Include every descendant so products assigned to nested admin categories
-      // also appear when a customer opens their parent category.
-      for (let index = 0; index < targetIds.length; index += 1) {
-        allCats
-          .filter((category) => category.parentId === targetIds[index])
-          .forEach((category) => {
-            if (!targetIds.includes(category.id)) targetIds.push(category.id);
-          });
+    try {
+      if (categoryId) {
+        const catSnap = await db().collection(COLLECTIONS.CATEGORIES).get();
+        const allCats = catSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        const targetIds = [categoryId];
+        // Include every descendant so products assigned to nested admin categories
+        // also appear when a customer opens their parent category.
+        for (let index = 0; index < targetIds.length; index += 1) {
+          allCats
+            .filter((category) => category.parentId === targetIds[index])
+            .forEach((category) => {
+              if (!targetIds.includes(category.id)) targetIds.push(category.id);
+            });
+        }
+        if (targetIds.length === 1) {
+          where.push(["categoryId", "==", categoryId]);
+        } else {
+          where.push(["categoryId", "in", targetIds.slice(0, 30)]);
+        }
       }
-      if (targetIds.length === 1) {
-        where.push(["categoryId", "==", categoryId]);
-      } else {
-        where.push(["categoryId", "in", targetIds.slice(0, 30)]);
-      }
-    }
-    if (brandId) where.push(["brandId", "==", brandId]);
-    if (availability) where.push(["availability", "==", availability]);
-    if (featured === "true") where.push(["isFeatured", "==", true]);
-    if (trending === "true") where.push(["isTrending", "==", true]);
-    if (bestseller === "true") where.push(["isBestseller", "==", true]);
-    if (monthlyStockUp === "true") where.push(["isMonthlyStockUp", "==", true]);
+      if (brandId) where.push(["brandId", "==", brandId]);
+      if (availability) where.push(["availability", "==", availability]);
+      if (featured === "true") where.push(["isFeatured", "==", true]);
+      if (trending === "true") where.push(["isTrending", "==", true]);
+      if (bestseller === "true") where.push(["isBestseller", "==", true]);
+      if (monthlyStockUp === "true") where.push(["isMonthlyStockUp", "==", true]);
 
-    const result = await Products.paginate({
-      where,
-      orderBy: { field: "createdAt", dir: "desc" },
-      limit: Math.min(Number(limit), 50),
-      startAfter: cursor || null,
-    });
-    res.json(result);
+      const result = await Products.paginate({
+        where,
+        orderBy: { field: "createdAt", dir: "desc" },
+        limit: Math.min(Number(limit), 50),
+        startAfter: cursor || null,
+      });
+      res.json(result);
+    } catch (err) {
+      if (err.code === 8 || err.message?.includes("Quota exceeded")) {
+        console.warn("Firestore quota exceeded in GET /api/products");
+        return res.json({ items: [], total: 0, cursor: null });
+      }
+      throw err;
+    }
   })
 );
 
 // In-memory products cache for fast, case-insensitive, multi-field search
 let cachedProducts = null;
 let lastCacheTime = 0;
+let inFlightSearchPromise = null;
 const CACHE_TTL_MS = 60 * 1000;
 
 async function getSearchableProducts() {
@@ -97,40 +106,53 @@ async function getSearchableProducts() {
   if (cachedProducts && now - lastCacheTime < CACHE_TTL_MS) {
     return cachedProducts;
   }
-  const [prodSnap, catSnap, brandSnap] = await Promise.all([
-    db().collection(COLLECTIONS.PRODUCTS).get(),
-    db().collection(COLLECTIONS.CATEGORIES).get(),
-    db().collection(COLLECTIONS.BRANDS).get(),
-  ]);
+  if (inFlightSearchPromise) {
+    return inFlightSearchPromise;
+  }
 
-  const catMap = new Map();
-  catSnap.docs.forEach((d) => catMap.set(d.id, { id: d.id, ...d.data() }));
+  inFlightSearchPromise = (async () => {
+    try {
+      const [prodSnap, catSnap, brandSnap] = await Promise.all([
+        db().collection(COLLECTIONS.PRODUCTS).get(),
+        db().collection(COLLECTIONS.CATEGORIES).get(),
+        db().collection(COLLECTIONS.BRANDS).get(),
+      ]);
 
-  const brandMap = new Map();
-  brandSnap.docs.forEach((d) => brandMap.set(d.id, { id: d.id, ...d.data() }));
+      const catMap = new Map();
+      catSnap.docs.forEach((d) => catMap.set(d.id, { id: d.id, ...d.data() }));
 
-  cachedProducts = prodSnap.docs.map((d) => {
-    const data = d.data();
-    const cat = data.categoryId ? catMap.get(data.categoryId) : null;
-    const parentCat = cat?.parentId ? catMap.get(cat.parentId) : null;
-    const brand = data.brandId ? brandMap.get(data.brandId) : null;
+      const brandMap = new Map();
+      brandSnap.docs.forEach((d) => brandMap.set(d.id, { id: d.id, ...d.data() }));
 
-    return {
-      id: d.id,
-      ...data,
-      categoryName: cat?.name || data.categoryName || data.category || "",
-      parentCategoryName: parentCat?.name || "",
-      brandName: brand?.name || data.brandName || data.brand || "",
-    };
-  });
+      cachedProducts = prodSnap.docs.map((d) => {
+        const data = d.data();
+        const cat = data.categoryId ? catMap.get(data.categoryId) : null;
+        const parentCat = cat?.parentId ? catMap.get(cat.parentId) : null;
+        const brand = data.brandId ? brandMap.get(data.brandId) : null;
 
-  lastCacheTime = now;
-  return cachedProducts;
+        return {
+          id: d.id,
+          ...data,
+          categoryName: cat?.name || data.categoryName || data.category || "",
+          parentCategoryName: parentCat?.name || "",
+          brandName: brand?.name || data.brandName || data.brand || "",
+        };
+      });
+
+      lastCacheTime = Date.now();
+      return cachedProducts;
+    } finally {
+      inFlightSearchPromise = null;
+    }
+  })();
+
+  return inFlightSearchPromise;
 }
 
 function invalidateProductsCache() {
   cachedProducts = null;
   lastCacheTime = 0;
+  inFlightSearchPromise = null;
 }
 
 function stem(word) {

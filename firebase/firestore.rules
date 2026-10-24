@@ -80,7 +80,7 @@ service cloud.firestore {
 
     // ── Delivery partners: authenticated read (for live tracking); admin all; no client write. ──
     match /deliveryPartners/{uid} {
-      allow read: if isAuthenticated();
+      allow read: if isSignedIn();
       allow write: if false;
     }
 

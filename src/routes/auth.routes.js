@@ -22,8 +22,8 @@ function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
 
-function signCustomerToken(uid, email) {
-  return jwt.sign({ uid, role: ROLES.CUSTOMER, email }, JWT_SECRET, { expiresIn: "30d" });
+function signCustomerToken(uid, email, role = ROLES.CUSTOMER) {
+  return jwt.sign({ uid, role, email }, JWT_SECRET, { expiresIn: "30d" });
 }
 
 // Mirrors a customer's email/password credentials into Firebase Auth, using the SAME uid
@@ -60,16 +60,99 @@ async function mirrorToFirebaseAuth(uid, email, password, name) {
   }
 }
 
+async function verifyWithFirebaseAuth(email, password) {
+  const apiKey = process.env.FIREBASE_API_KEY || "AIzaSyDR-BltC2fuUfA76m29S-HXP6ZidlWrW34";
+  try {
+    const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${apiKey}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password, returnSecureToken: true }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      return { success: false, error: data.error.message };
+    }
+    return { success: true, user: data };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+let firestoreQuotaExhaustedUntil = 0;
+function isFirestoreQuotaExhausted() {
+  return Date.now() < firestoreQuotaExhaustedUntil;
+}
+function markFirestoreQuotaExhausted() {
+  firestoreQuotaExhaustedUntil = Date.now() + 60_000;
+}
+
 async function findUserByEmail(email) {
-  const snap = await db().collection(COLLECTIONS.USERS).where("email", "==", email).limit(1).get();
-  if (snap.empty) return null;
-  return { id: snap.docs[0].id, ...snap.docs[0].data() };
+  if (!isFirestoreQuotaExhausted()) {
+    try {
+      const snap = await db().collection(COLLECTIONS.USERS).where("email", "==", email).limit(1).get();
+      if (!snap.empty) return { id: snap.docs[0].id, ...snap.docs[0].data() };
+    } catch (err) {
+      if (err.code === 8 || err.message?.includes("Quota exceeded")) {
+        markFirestoreQuotaExhausted();
+        console.warn("Firestore quota exceeded in findUserByEmail, falling back to authAdmin");
+      } else {
+        throw err;
+      }
+    }
+  }
+  try {
+    const u = await authAdmin().getUserByEmail(email);
+    return {
+      id: u.uid,
+      email: u.email,
+      name: u.displayName || email.split("@")[0],
+      role: u.customClaims?.role || ROLES.CUSTOMER,
+      isAuthOnly: true,
+    };
+  } catch {
+    return null;
+  }
 }
 
 async function findUserByMobile(mobile) {
-  const snap = await db().collection(COLLECTIONS.USERS).where("mobile", "==", mobile).limit(1).get();
-  if (snap.empty) return null;
-  return { id: snap.docs[0].id, ...snap.docs[0].data() };
+  if (!isFirestoreQuotaExhausted()) {
+    try {
+      const snap = await db().collection(COLLECTIONS.USERS).where("mobile", "==", mobile).limit(1).get();
+      if (!snap.empty) return { id: snap.docs[0].id, ...snap.docs[0].data() };
+    } catch (err) {
+      if (err.code === 8 || err.message?.includes("Quota exceeded")) {
+        markFirestoreQuotaExhausted();
+        console.warn("Firestore quota exceeded in findUserByMobile, falling back to authAdmin");
+      } else {
+        throw err;
+      }
+    }
+  }
+  try {
+    const u = await authAdmin().getUserByEmail(`${mobile}@ms-traders.in`);
+    return {
+      id: u.uid,
+      email: u.email,
+      mobile,
+      name: u.displayName || "User",
+      role: u.customClaims?.role || ROLES.CUSTOMER,
+      isAuthOnly: true,
+    };
+  } catch {
+    try {
+      const u = await authAdmin().getUserByPhoneNumber(`+91${mobile}`);
+      return {
+        id: u.uid,
+        email: u.email,
+        mobile,
+        name: u.displayName || "User",
+        role: u.customClaims?.role || ROLES.CUSTOMER,
+        isAuthOnly: true,
+      };
+    } catch {
+      return null;
+    }
+  }
 }
 
 // POST /api/auth/register — new customer signs up with name, mobile, and optional email/password
@@ -140,11 +223,13 @@ router.post(
       user = await findUserByMobile(cleanMobile);
       if (!user) {
         // Also check if delivery partner has this mobile
-        const dpSnap = await db().collection(COLLECTIONS.DELIVERY_PARTNERS).where("mobile", "==", cleanMobile).limit(1).get();
-        if (!dpSnap.empty) {
-          user = { id: dpSnap.docs[0].id, ...dpSnap.docs[0].data() };
-          role = ROLES.PARTNER;
-        }
+        try {
+          const dpSnap = await db().collection(COLLECTIONS.DELIVERY_PARTNERS).where("mobile", "==", cleanMobile).limit(1).get();
+          if (!dpSnap.empty) {
+            user = { id: dpSnap.docs[0].id, ...dpSnap.docs[0].data() };
+            role = ROLES.PARTNER;
+          }
+        } catch (_dpErr) {}
       }
       if (user) {
         normalizedEmail = user.email || `${cleanMobile}@ms-traders.in`;
@@ -152,10 +237,36 @@ router.post(
     } else if (email) {
       user = await findUserByEmail(normalizedEmail);
       if (!user) {
-        const dpSnap = await db().collection(COLLECTIONS.DELIVERY_PARTNERS).where("email", "==", normalizedEmail).limit(1).get();
-        if (!dpSnap.empty) {
-          user = { id: dpSnap.docs[0].id, ...dpSnap.docs[0].data() };
-          role = ROLES.PARTNER;
+        try {
+          const dpSnap = await db().collection(COLLECTIONS.DELIVERY_PARTNERS).where("email", "==", normalizedEmail).limit(1).get();
+          if (!dpSnap.empty) {
+            user = { id: dpSnap.docs[0].id, ...dpSnap.docs[0].data() };
+            role = ROLES.PARTNER;
+          }
+        } catch (_dpErr) {}
+      }
+    }
+
+    // If user is not yet resolved, verify directly with Firebase Auth (e.g. if Firestore quota is exceeded)
+    if (!user) {
+      const candidateEmail = normalizedEmail || (mobile ? `${String(mobile).trim().replace(/[^0-9]/g, "")}@ms-traders.in` : null);
+      if (candidateEmail) {
+        const fbAuth = await verifyWithFirebaseAuth(candidateEmail, password);
+        if (fbAuth.success) {
+          try {
+            const authRecord = await authAdmin().getUser(fbAuth.user.localId);
+            role = authRecord.customClaims?.role || ROLES.CUSTOMER;
+            user = {
+              id: authRecord.uid,
+              name: authRecord.displayName || candidateEmail.split("@")[0],
+              email: candidateEmail,
+              mobile: (authRecord.phoneNumber || mobile || "").replace(/^\+91/, ""),
+              isAuthOnly: true,
+            };
+            normalizedEmail = candidateEmail;
+          } catch (_err) {}
+        } else if (fbAuth.error === "INVALID_LOGIN_CREDENTIALS" || fbAuth.error === "INVALID_PASSWORD") {
+          return res.status(401).json({ error: "Incorrect password" });
         }
       }
     }
@@ -167,16 +278,27 @@ router.post(
       });
     }
 
+    if (user.role) {
+      role = user.role;
+    }
+
     // If password was provided, verify it
-    if (role === ROLES.CUSTOMER) {
-      if (!user.passwordHash) return res.status(401).json({ error: "Please reset your password before signing in." });
+    if (user.passwordHash) {
       const match = await bcrypt.compare(password, user.passwordHash);
       if (!match) {
         return res.status(401).json({ error: "Incorrect password" });
       }
+    } else {
+      const candidateEmail = normalizedEmail || user.email || (mobile ? `${mobile}@ms-traders.in` : null);
+      if (candidateEmail) {
+        const fbAuth = await verifyWithFirebaseAuth(candidateEmail, password);
+        if (!fbAuth.success) {
+          return res.status(401).json({ error: "Incorrect password" });
+        }
+      }
     }
 
-    const token = signCustomerToken(user.id, normalizedEmail || user.email || "user@ms-traders.in");
+    const token = signCustomerToken(user.id, normalizedEmail || user.email || "user@ms-traders.in", role);
     res.json({ ...publicUser(user), token, role });
   })
 );
@@ -336,12 +458,46 @@ router.get(
   "/me",
   authenticate,
   asyncHandler(async (req, res) => {
-    let user;
-    if (req.user.role === ROLES.PARTNER) {
-      user = await DeliveryPartners.findById(req.user.uid);
-    } else {
-      user = await Users.findById(req.user.uid);
+    let user = null;
+    try {
+      if (req.user.role === ROLES.PARTNER) {
+        user = await DeliveryPartners.findById(req.user.uid);
+      } else {
+        user = await Users.findById(req.user.uid);
+      }
+    } catch (err) {
+      if (err.code === 8 || err.message?.includes("Quota exceeded")) {
+        console.warn("Firestore quota exceeded in /api/auth/me, falling back to authAdmin");
+      } else {
+        throw err;
+      }
     }
+
+    if (!user) {
+      try {
+        const authUser = await authAdmin().getUser(req.user.uid);
+        user = {
+          id: authUser.uid,
+          name: authUser.displayName || req.user.email?.split("@")[0] || "User",
+          email: authUser.email || req.user.email,
+          mobile: (authUser.phoneNumber || req.user.phone || "").replace(/^\+91/, ""),
+          role: req.user.role || ROLES.CUSTOMER,
+          isGuest: false,
+        };
+      } catch (_authErr) {
+        if (req.user.uid) {
+          user = {
+            id: req.user.uid,
+            name: req.user.email?.split("@")[0] || "User",
+            email: req.user.email,
+            mobile: (req.user.phone || "").replace(/^\+91/, ""),
+            role: req.user.role || ROLES.CUSTOMER,
+            isGuest: false,
+          };
+        }
+      }
+    }
+
     if (!user) return res.status(404).json({ error: "User not found" });
     res.json({ ...publicUser(user), role: req.user.role });
   })

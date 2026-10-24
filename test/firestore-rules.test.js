@@ -116,6 +116,13 @@ test("Firestore Security Rules Suite", async (t) => {
         userId: "cust-A",
         issueType: "Damaged Items",
       });
+
+      // Seed delivery partner
+      await db.collection("deliveryPartners").doc("partner-1").set({
+        name: "Driver 1",
+        phone: "9876543210",
+        location: { lat: 8.5241, lng: 76.9366 },
+      });
     });
   });
 
@@ -262,6 +269,25 @@ test("Firestore Security Rules Suite", async (t) => {
     // Client writes are denied (handled safely via backend)
     await assertFails(custADb.collection("refunds").doc("ref-new").set({ userId: "cust-A", totalRefund: 100 }));
     await assertFails(custADb.collection("issues").doc("issue-new").set({ userId: "cust-A", issueType: "Other" }));
+  });
+
+  await t.test("Delivery Partners: authenticated users can read for live tracking, unauthenticated denied, writes denied", async () => {
+    const custADb = testEnv.authenticatedContext("cust-A", { role: "CUSTOMER" }).firestore();
+    const partner1Db = testEnv.authenticatedContext("partner-1", { role: "PARTNER" }).firestore();
+    const adminDb = testEnv.authenticatedContext("admin-1", { role: "ADMIN" }).firestore();
+    const unauthDb = testEnv.unauthenticatedContext().firestore();
+
+    // Authenticated users (customer, partner, admin) can read partner doc (for tracking)
+    await assertSucceeds(custADb.collection("deliveryPartners").doc("partner-1").get());
+    await assertSucceeds(partner1Db.collection("deliveryPartners").doc("partner-1").get());
+    await assertSucceeds(adminDb.collection("deliveryPartners").doc("partner-1").get());
+
+    // Unauthenticated user cannot read partner doc
+    await assertFails(unauthDb.collection("deliveryPartners").doc("partner-1").get());
+
+    // Client writes are denied
+    await assertFails(custADb.collection("deliveryPartners").doc("partner-1").update({ name: "Hacked" }));
+    await assertFails(partner1Db.collection("deliveryPartners").doc("partner-1").update({ name: "Hacked" }));
   });
 
   await t.test("Default deny: unmapped collections are blocked", async () => {

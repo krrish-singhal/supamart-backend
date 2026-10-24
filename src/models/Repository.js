@@ -63,6 +63,9 @@ class Repository {
 
   // cursor pagination
   async paginate({ where = [], orderBy = null, limit = 20, startAfter = null } = {}) {
+    const parsedLimit = Number(limit);
+    const validLimit = Number.isInteger(parsedLimit) && parsedLimit > 0 ? parsedLimit : 20;
+
     let q = this.col();
     where.forEach(([f, op, v]) => (q = q.where(f, op, v)));
     if (orderBy) q = q.orderBy(orderBy.field, orderBy.dir || "asc");
@@ -75,11 +78,12 @@ class Repository {
       const startDoc = await this.col().doc(startAfter).get();
       if (startDoc.exists) q = q.startAfter(startDoc);
     }
+    q = q.limit(validLimit);
     try {
       const snap = await q.get();
       const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       const last = snap.docs[snap.docs.length - 1] || null;
-      const hasMore = snap.size === limit;
+      const hasMore = snap.size === validLimit;
       // Only hand back a cursor when there's actually more to fetch — otherwise a short
       // result set (e.g. a brand with 2 products) still returns a truthy cursor and the
       // client loops forever calling "load more" against a page that never grows.
@@ -89,13 +93,21 @@ class Repository {
         console.warn(`[Firestore] Missing composite index for query; falling back to in-memory sorting:`, err.message);
         let fallbackQ = this.col();
         where.forEach(([f, op, v]) => (fallbackQ = fallbackQ.where(f, op, v)));
-        fallbackQ = fallbackQ.limit(limit);
+        fallbackQ = fallbackQ.limit(validLimit);
         const snap = await fallbackQ.get();
         const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
         if (orderBy.dir === "desc") {
-          items.sort((a, b) => (b[orderBy.field] || 0) - (a[orderBy.field] || 0));
+          items.sort((a, b) => {
+            const diff = (b[orderBy.field] || 0) - (a[orderBy.field] || 0);
+            if (diff !== 0) return diff;
+            return String(b.id || "").localeCompare(String(a.id || ""));
+          });
         } else {
-          items.sort((a, b) => (a[orderBy.field] || 0) - (b[orderBy.field] || 0));
+          items.sort((a, b) => {
+            const diff = (a[orderBy.field] || 0) - (b[orderBy.field] || 0);
+            if (diff !== 0) return diff;
+            return String(a.id || "").localeCompare(String(b.id || ""));
+          });
         }
         return { items, cursor: null, hasMore: false };
       }

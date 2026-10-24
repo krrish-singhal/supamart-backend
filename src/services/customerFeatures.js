@@ -21,7 +21,7 @@ function validate(schema, input) {
 function validateOrderRatings(order, userId, input) {
   if (!order) throw Object.assign(new Error('Order not found'), { statusCode: 404 });
   if (order.userId !== userId) throw Object.assign(new Error('Forbidden'), { statusCode: 403 });
-  if (order.status !== 'DELIVERED') throw Object.assign(new Error('You can rate an order after delivery'), { statusCode: 409 });
+  if (order.status !== 'DELIVERED' && order.status !== 'PENDING_CONFIRMATION') throw Object.assign(new Error('You can rate an order after delivery'), { statusCode: 409 });
   const value = validate(ratingSchema, input);
   const purchased = new Set(order.items.map(item => item.productId));
   const ids = value.productRatings.map(item => item.productId);
