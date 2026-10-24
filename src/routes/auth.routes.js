@@ -1,7 +1,8 @@
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
-const crypto = require("crypto");
+const rateLimit = require("express-rate-limit");
+const { issueCode, cancelCode, verifyCode, claimReset, fail } = require("../services/accountCodes");
 const { asyncHandler } = require("../middleware/error");
 const { authenticate } = require("../middleware/auth");
 const { Users, DeliveryPartners } = require("../models");
@@ -15,7 +16,6 @@ const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) throw new Error("JWT_SECRET is required");
 
-const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || "http://localhost:5000";
 const BCRYPT_ROUNDS = 10;
 
 function normalizeEmail(email) {
@@ -168,7 +168,8 @@ router.post(
     }
 
     // If password was provided, verify it
-    if (password && role === ROLES.CUSTOMER && user.passwordHash) {
+    if (role === ROLES.CUSTOMER) {
+      if (!user.passwordHash) return res.status(401).json({ error: "Please reset your password before signing in." });
       const match = await bcrypt.compare(password, user.passwordHash);
       if (!match) {
         return res.status(401).json({ error: "Incorrect password" });
@@ -180,112 +181,60 @@ router.post(
   })
 );
 
-// POST /api/auth/forgot-password — emails a reset link (always 200, doesn't reveal if the email exists)
-router.post(
-  "/forgot-password",
-  asyncHandler(async (req, res) => {
-    const { email } = req.body;
-    if (!email) return res.status(422).json({ error: "email is required" });
-    const normalizedEmail = normalizeEmail(email);
-    const user = await findUserByEmail(normalizedEmail);
-
-    if (!user) {
-      return res.status(404).json({ error: "Email not found in our system." });
-    }
-
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expires = Date.now() + 15 * 60 * 1000; // 15 mins
-    await Users.update(user.id, { resetPasswordOtp: otp, resetPasswordExpires: expires, updatedAt: Date.now() });
-
-    const result = await sendOTPEmail(normalizedEmail, otp);
-    if (!result.delivered) {
-      return res.status(500).json({ error: "Failed to send the passcode email. Please try again later." });
-    }
-
-    res.json({ ok: true, message: "A 6-digit passcode has been sent to your email." });
-  })
-);
-
-// POST /api/auth/verify-reset-otp — checks the 6-digit OTP and generates a reset token
-router.post(
-  "/verify-reset-otp",
-  asyncHandler(async (req, res) => {
-    const { email, otp } = req.body;
-    if (!email || !otp) return res.status(422).json({ error: "email and otp are required" });
-    const normalizedEmail = normalizeEmail(email);
-
-    const snap = await db()
-      .collection(COLLECTIONS.USERS)
-      .where("email", "==", normalizedEmail)
-      .where("resetPasswordOtp", "==", otp.trim())
-      .limit(1)
-      .get();
-
-    if (snap.empty) return res.status(400).json({ error: "Invalid or incorrect OTP." });
-    const doc = snap.docs[0];
-    const user = doc.data();
-
-    if (!user.resetPasswordExpires || user.resetPasswordExpires < Date.now()) {
-      return res.status(400).json({ error: "This OTP has expired. Please request a new one." });
-    }
-
-    const rawToken = crypto.randomBytes(32).toString("hex");
-    const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
-    const expires = Date.now() + 30 * 60 * 1000; // 30 mins
-
-    await Users.update(doc.id, {
-      resetPasswordOtp: null, // clear OTP
-      resetPasswordTokenHash: tokenHash,
-      resetPasswordExpires: expires,
-      updatedAt: Date.now(),
-    });
-
-    res.json({ ok: true, resetToken: rawToken });
-  })
-);
-
-// POST /api/auth/reset-password — sets a new password using the token from the email
-router.post(
-  "/reset-password",
-  asyncHandler(async (req, res) => {
-    const { token, password } = req.body;
-    if (!token || !password) return res.status(422).json({ error: "token and password are required" });
-    if (String(password).length < 8) {
-      return res.status(422).json({ error: "Password must be at least 8 characters" });
-    }
-
-    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
-    const snap = await db()
-      .collection(COLLECTIONS.USERS)
-      .where("resetPasswordTokenHash", "==", tokenHash)
-      .limit(1)
-      .get();
-    if (snap.empty) return res.status(400).json({ error: "This reset link is invalid. Please request a new one." });
-
-    const doc = snap.docs[0];
-    const user = doc.data();
-    if (!user.resetPasswordExpires || user.resetPasswordExpires < Date.now()) {
-      return res.status(400).json({ error: "This reset link has expired. Please request a new one." });
-    }
-
-    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
-    await Users.update(doc.id, {
-      passwordHash,
-      resetPasswordTokenHash: null,
-      resetPasswordExpires: null,
-      updatedAt: Date.now(),
-    });
-    
-    // Crucial: Update Firebase Auth to ensure the fast-path remains synchronized.
+// Additional IP limit complements persistent per-account transactional limits.
+const recoveryLimit = rateLimit({ windowMs: 60 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false,
+  message: { error: "Too many recovery requests. Please try again later." } });
+const validEmail = email => typeof email === 'string' && email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+router.post('/forgot-password', recoveryLimit, asyncHandler(async (req, res) => {
+  if (!validEmail(req.body.email)) throw fail('Enter a valid email address.', 422);
+  const email = normalizeEmail(req.body.email);
+  const user = await findUserByEmail(email);
+  if (!user) throw fail('Email does not exist. Please enter your registered email address.', 404);
+  const issued = await issueCode('reset', email, user.id);
+  const result = await sendOTPEmail(email, issued.otp);
+  if (!result.delivered) {
+    await cancelCode('reset', email, issued.generation);
+    throw fail('Unable to send the code email. Please try again later.', 503);
+  }
+  res.json({ ok: true, message: 'A six-digit code has been sent to your registered email.', expiresIn: 900 });
+}));
+router.post('/verify-reset-otp', recoveryLimit, asyncHandler(async (req, res) => {
+  if (!validEmail(req.body.email)) throw fail('Enter a valid email address.', 422);
+  const result = await verifyCode('reset', normalizeEmail(req.body.email), req.body.otp);
+  res.json({ ok: true, resetToken: result.token });
+}));
+router.post('/reset-password', recoveryLimit, asyncHandler(async (req, res) => {
+  const { email, token, password, confirmPassword } = req.body;
+  if (!validEmail(email) || typeof token !== 'string' || !/^[a-f0-9]{64}$/.test(token)) throw fail('Invalid reset permission.', 422);
+  if (typeof password !== 'string' || password.length < 8 || Buffer.byteLength(password, 'utf8') > 72) throw fail('Password must be at least 8 characters and at most 72 UTF-8 bytes.', 422);
+  if (confirmPassword !== password) throw fail('Passwords do not match.', 422);
+  const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+  const claim = await claimReset(normalizeEmail(email), token);
+  try {
+    // Await Firebase before reporting success: both login paths must accept the new password.
     try {
-      await authAdmin().updateUser(doc.id, { password });
-    } catch (err) {
-      console.error(`Firebase auth sync failed during password reset for uid=${doc.id}:`, err);
+      await authAdmin().updateUser(claim.uid, { password });
+    } catch (error) {
+      if (error.code !== 'auth/user-not-found') throw error;
+      await authAdmin().createUser({ uid: claim.uid, email: normalizeEmail(email), password });
     }
-    
-    res.json({ ok: true, message: "Password updated. You can now sign in." });
-  })
-);
+    await authAdmin().revokeRefreshTokens(claim.uid);
+    await db().runTransaction(async tx => {
+      const current = (await tx.get(claim.ref)).data();
+      if (!current?.processing || current.tokenHash !== claim.tokenHash) throw fail('Reset state changed. Please request a new code.', 409);
+      tx.update(db().collection(COLLECTIONS.USERS).doc(claim.uid), {
+        passwordHash, firebaseAuthMirrored: true, resetPasswordOtp: null,
+        resetPasswordTokenHash: null, resetPasswordExpires: null, updatedAt: Date.now(),
+      });
+      tx.update(claim.ref, { processing: false, tokenHash: null, codeHash: null });
+    });
+  } catch (error) {
+    await claim.ref.update({ processing: false });
+    console.error('Password reset could not complete:', error.code || error.name);
+    throw fail('Password update could not complete. Please retry saving your password.', 503);
+  }
+  res.json({ ok: true, message: 'Password updated. Sign in with your new password.' });
+}));
 
 // POST /api/auth/session
 // Upserts user/partner profile and returns a signed JWT.

@@ -17,6 +17,12 @@ function initFirebase() {
     credential: admin.credential.cert({ projectId, clientEmail, privateKey }),
   });
 
+  try {
+    admin.firestore().settings({ preferRest: true });
+  } catch (_e) {
+    // Ignore if already set
+  }
+
   initialized = true;
   return admin;
 }

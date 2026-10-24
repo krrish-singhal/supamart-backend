@@ -1,3 +1,4 @@
+const { storeStatus, withStoreHours } = require('../config/storeHours');
 const { validCoordinates, withDeliveryArea } = require('../config/deliveryArea');
 const { db } = require("../config/firebase");
 const dayjs = require("dayjs");
@@ -23,7 +24,7 @@ async function getConfig(tx) {
   const ref = db().collection(COLLECTIONS.CONFIG).doc("global");
   const snap = tx ? await tx.get(ref) : await ref.get();
   if (!snap.exists) throw Object.assign(new Error("Config missing"), { statusCode: 500 });
-  return { ref, data: withDeliveryArea(snap.data()) };
+  return { ref, data: withStoreHours(withDeliveryArea(snap.data())) };
 }
 
 /**
@@ -34,7 +35,7 @@ async function getConfig(tx) {
  * - allocates sequential order number
  * - writes daily + monthly metric counters (incl. peak-hour histogram)
  */
-async function placeOrder({ userId, cartItems, couponCode, address, slot, notes, paymentMethod, idempotencyKey }) {
+async function placeOrder({ userId, cartItems, couponCode, address, notes, paymentMethod, idempotencyKey }) {
   // Cash on Delivery has been discontinued — UPI_MANUAL is the only accepted method.
   // Enforced here (not just hidden in the UI) so no client build can place a COD order.
   if (paymentMethod !== PAYMENT_METHOD.UPI_MANUAL) {
@@ -88,6 +89,13 @@ async function placeOrder({ userId, cartItems, couponCode, address, slot, notes,
     }
 
     const { ref: cfgRef, data: config } = await getConfig(tx);
+
+    // Check after idempotency lookup: retrying an already-created order stays safe after closing.
+    if (!storeStatus().isOpen) {
+      throw Object.assign(new Error('The shop is closed. Order daily from 10 AM to 11 PM (India time).'), {
+        statusCode: 422, code: 'STORE_CLOSED',
+      });
+    }
 
     // Check the actual address before stock/price work or any transaction writes.
     const geo = evaluateDelivery(config, address.lat, address.lng);
@@ -183,7 +191,7 @@ async function placeOrder({ userId, cartItems, couponCode, address, slot, notes,
       userPhone: userData.mobile || null,
       items,
       addressSnapshot: address,
-      slot,
+      deliveryMode: "ON_DEMAND",
       notes: notes || null,
       paymentMethod,
       paymentStatus: PAYMENT_STATUS.PENDING,
@@ -193,6 +201,7 @@ async function placeOrder({ userId, cartItems, couponCode, address, slot, notes,
       discount,
       total,
       distanceKm: geo.distanceKm,
+      estimatedDeliveryAt: now + Math.ceil((config.preparationMinutes ?? 15) + geo.distanceKm / (config.deliverySpeedKmph || 20) * 60) * 60000,
       status: ORDER_STATUS.PLACED,
       statusHistory: [{ status: ORDER_STATUS.PLACED, at: now }],
       assignedPartnerId: null,

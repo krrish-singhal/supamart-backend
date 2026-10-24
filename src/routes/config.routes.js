@@ -1,3 +1,4 @@
+const { withStoreHours, storeStatus } = require('../config/storeHours');
 const { withDeliveryArea } = require('../config/deliveryArea');
 const express = require("express");
 const { asyncHandler } = require("../middleware/error");
@@ -18,13 +19,13 @@ router.get(
   "/",
   asyncHandler(async (req, res) => {
     if (cache && Date.now() - cacheAt < CACHE_TTL_MS) {
-      return res.json(cache);
+      return res.json({ ...cache, serverTime: Date.now(), storeStatus: storeStatus() });
     }
     const snap = await db().collection(COLLECTIONS.CONFIG).doc("global").get();
     if (!snap.exists) return res.status(503).json({ error: "Config not initialized. Run npm run seed." });
-    cache = withDeliveryArea({ id: snap.id, ...snap.data() });
+    cache = withStoreHours(withDeliveryArea({ id: snap.id, ...snap.data() }));
     cacheAt = Date.now();
-    res.json(cache);
+    res.json({ ...cache, serverTime: Date.now(), storeStatus: storeStatus() });
   })
 );
 
@@ -40,16 +41,16 @@ router.put(
       e.statusCode = 404;
       throw e;
     }
-    const merged = { ...withDeliveryArea(snap.data()), ...req.body, updatedAt: Date.now() };
+    const merged = withStoreHours({ ...withDeliveryArea(snap.data()), ...req.body, updatedAt: Date.now() });
     const { error, value } = configSchema.validate(merged, { abortEarly: false });
     if (error) {
       const e = new Error("Validation failed: " + error.details.map((d) => d.message).join("; "));
       e.statusCode = 422;
       throw e;
     }
-    await db().collection(COLLECTIONS.CONFIG).doc("global").set(withDeliveryArea(value));
+    await db().collection(COLLECTIONS.CONFIG).doc("global").set(withStoreHours(withDeliveryArea(value)));
     cache = null; // invalidate cache
-    res.json(withDeliveryArea(value));
+    res.json({ ...withStoreHours(withDeliveryArea(value)), serverTime: Date.now(), storeStatus: storeStatus() });
   })
 );
 

@@ -84,6 +84,12 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // ── Broadcasts: admin read; backend writes. ──
+    match /broadcasts/{id} {
+      allow read: if isSignedIn() && isAdmin();
+      allow write: if false;
+    }
+
     // ── Idempotency keys: backend-only. ──
     match /orderIdempotency/{key} {
       allow read, write: if false;

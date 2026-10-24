@@ -66,8 +66,8 @@ async function deleteUserAccount(targetUid, requestingUser, options = {}) {
     }
   }
 
-  // Re-authentication check for account owners (admin bypasses password requirement)
-  if (!isAdmin && user.passwordHash) {
+  // Re-authentication check for account owners (admin or OTP-verified flow bypasses password requirement)
+  if (!isAdmin && !options.forceVerified && user.passwordHash) {
     if (!options.password) {
       const err = new Error("Password is required to confirm account deletion");
       err.statusCode = 400;
@@ -116,6 +116,7 @@ async function deleteUserAccount(targetUid, requestingUser, options = {}) {
     uid: targetUid,
     ordersAnonymized: 0,
     addressesDeleted: 0,
+    shoppingListsDeleted: 0,
     notificationsDeleted: 0,
     cartDeleted: false,
     avatarDeleted: false,
@@ -188,6 +189,19 @@ async function deleteUserAccount(targetUid, requestingUser, options = {}) {
   } catch (err) {
     console.error(`[AccountDeletion] Addresses deletion failed for ${targetUid}:`, err);
     summary.errors.push({ step: "addressesDeletion", error: err.message });
+  }
+
+  // Saved lists are private account data and must be removed with the account.
+  try {
+    const lists = await firestore.collection(COLLECTIONS.USERS).doc(targetUid).collection("shoppingLists").get();
+    for (let offset = 0; offset < lists.docs.length; offset += 450) {
+      const batch = firestore.batch();
+      lists.docs.slice(offset, offset + 450).forEach(doc => batch.delete(doc.ref));
+      await batch.commit();
+    }
+    summary.shoppingListsDeleted = lists.docs.length;
+  } catch (err) {
+    summary.errors.push({ step: "shoppingListsDeletion", error: err.message });
   }
 
   // 3. Delete Notifications subcollection

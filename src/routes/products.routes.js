@@ -213,7 +213,7 @@ router.get(
     const hasConjunction = /[&/+,]|\b(?:and|or)\b/i.test(rawTerm);
     const segments = rawTerm.split(/[&/+,]|\b(?:and|or)\b/i).map((s) => (s || "").trim()).filter(Boolean);
     const stopWords = new Set(["&", "and", "or", "in", "of", "the", "a", "an", "to", "for", "with"]);
-    const words = rawTerm.replace(/[&/+,._-]/g, " ").split(/\s+/).filter((w) => w && !stopWords.has(w));
+    const words = rawTerm.replace(/[&/+,._-]/g, " ").split(/\s+/).filter((w) => w && (rawTerm.length <= 2 || !stopWords.has(w)));
 
     const scored = [];
 
@@ -287,7 +287,7 @@ router.get(
     }
 
     scored.sort((a, b) => b.score - a.score);
-    const items = scored.slice(0, Number(limit)).map((s) => s.product);
+    const items = scored.slice(0, Math.max(1, Math.min(200, Number(limit) || 30))).map((s) => s.product);
 
     res.json({ items });
   })

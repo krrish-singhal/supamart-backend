@@ -199,6 +199,9 @@ test("Account Deletion Service Unit Tests", async (t) => {
                     }),
                   };
                 }
+                if (subCol === "shoppingLists") {
+                  return { get: async () => ({ empty: false, docs: [{ id: "list-1", ref: { id: "list-1", type: "shoppingList" } }] }) };
+                }
                 if (subCol === "notifications") {
                   return {
                     get: async () => ({
@@ -274,6 +277,7 @@ test("Account Deletion Service Unit Tests", async (t) => {
       assert.strictEqual(res.summary.avatarDeleted, true);
       assert.strictEqual(res.summary.ordersAnonymized, 1);
       assert.strictEqual(res.summary.addressesDeleted, 2);
+      assert.strictEqual(res.summary.shoppingListsDeleted, 1);
       assert.strictEqual(res.summary.notificationsDeleted, 1);
 
       // Verify specific side effects

@@ -129,6 +129,9 @@ router.post(
 
     if (offerData.validFrom) offerData.validFrom = Number(offerData.validFrom);
     if (offerData.validTo) offerData.validTo = Number(offerData.validTo);
+    if (offerData.scope === "CART" || !offerData.scopeId) {
+      offerData.scopeId = null;
+    }
     offerData.createdAt = Date.now();
     offerData.updatedAt = Date.now();
 
@@ -167,6 +170,10 @@ router.put(
     }
     if (updateData.validFrom) updateData.validFrom = Number(updateData.validFrom);
     if (updateData.validTo) updateData.validTo = Number(updateData.validTo);
+    if (updateData.scope === "CART" || !updateData.scopeId) {
+      updateData.scopeId = null;
+    }
+    updateData.updatedAt = Date.now();
 
     const updated = await Offers.update(req.params.id, updateData);
     res.json(updated);

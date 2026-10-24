@@ -8,6 +8,13 @@ const STORE_LOCATION = Object.freeze({
   mapsUrl: 'https://share.google/HufMXvVSvLv6chNM5',
 });
 const SERVICE_RADIUS_KM = 5;
+const DELIVERY_TIERS = Object.freeze([
+  Object.freeze({ maxKm: 1, charge: 10 }),
+  Object.freeze({ maxKm: 2, charge: 15 }),
+  Object.freeze({ maxKm: 3, charge: 20 }),
+  Object.freeze({ maxKm: 4, charge: 25 }),
+  Object.freeze({ maxKm: 5, charge: 30 }),
+]);
 const EARTH_RADIUS_KM = 6371;
 // One micrometre: absorbs floating-point error at exactly 5 km, not a delivery allowance.
 const BOUNDARY_EPSILON_KM = 1e-9;
@@ -32,6 +39,12 @@ function withinDistance(distanceKm, radiusKm) {
     && distanceKm <= radiusKm + BOUNDARY_EPSILON_KM;
 }
 
+// Inclusive upper bounds: exactly 1 km costs ₹10; just over 1 km costs ₹15.
+function deliveryChargeForDistance(distanceKm) {
+  if (!withinDistance(distanceKm, SERVICE_RADIUS_KM)) return 0;
+  return DELIVERY_TIERS.find(tier => withinDistance(distanceKm, tier.maxKm)).charge;
+}
+
 function evaluateServiceArea(lat, lng) {
   const distanceKm = haversineKm(STORE_LOCATION.lat, STORE_LOCATION.lng, lat, lng);
   return {
@@ -44,6 +57,8 @@ function evaluateServiceArea(lat, lng) {
 function withDeliveryArea(config = {}) {
   return {
     ...config,
+    deliveryTiers: DELIVERY_TIERS.map(tier => ({ ...tier })),
+    freeDeliveryThreshold: Number.isFinite(config.freeDeliveryThreshold) && config.freeDeliveryThreshold >= 0 ? config.freeDeliveryThreshold : 3000,
     storeLat: STORE_LOCATION.lat,
     storeLng: STORE_LOCATION.lng,
     storeAddress: STORE_LOCATION.address,
@@ -54,4 +69,4 @@ function withDeliveryArea(config = {}) {
   };
 }
 
-module.exports = { STORE_LOCATION, SERVICE_RADIUS_KM, EARTH_RADIUS_KM, validCoordinates, haversineKm, withinDistance, evaluateServiceArea, withDeliveryArea };
+module.exports = { STORE_LOCATION, SERVICE_RADIUS_KM, DELIVERY_TIERS, deliveryChargeForDistance, EARTH_RADIUS_KM, validCoordinates, haversineKm, withinDistance, evaluateServiceArea, withDeliveryArea };

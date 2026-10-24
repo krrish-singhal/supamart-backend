@@ -7,23 +7,21 @@ const deliveryTierSchema = Joi.object({
   charge: Joi.number().min(0).required(),
 });
 
-const slotSchema = Joi.object({
-  label: Joi.string().required(), // "9AM - 11AM"
-  from: Joi.string().required(),
-  to: Joi.string().required(),
-  active: Joi.boolean().default(true),
-});
-
 const configSchema = Joi.object({
   storeLat: Joi.number().valid(STORE_LOCATION.lat).required(),
   storeLng: Joi.number().valid(STORE_LOCATION.lng).required(),
-  serviceRadiusKm: Joi.number().valid(SERVICE_RADIUS_KM).default(SERVICE_RADIUS_KM),
-  minOrderValue: Joi.number().min(0).default(200),
-  taxPercent: Joi.number().min(0).max(100).default(0),
-  deliveryTiers: Joi.array().items(deliveryTierSchema).min(1).required(),
-  slots: Joi.array().items(slotSchema).min(1).required(),
-  orderSeq: Joi.number().integer().min(1000).default(1000), // running order number
-  updatedAt: Joi.number().required(),
+  serviceRadiusKm: Joi.number().valid(SERVICE_RADIUS_KM).required(),
+  freeDeliveryThreshold: Joi.number().min(0).optional(),
+  preparationMinutes: Joi.number().min(0).max(180).optional(),
+  deliverySpeedKmph: Joi.number().min(1).max(100).optional(),
+  minOrderValue: Joi.number().min(0).optional(),
+  taxPercent: Joi.number().min(0).max(100).optional(),
+  deliveryTiers: Joi.array().items(deliveryTierSchema).optional(),
+  slots: Joi.array().optional(),
+  deliveryMode: Joi.string().optional(),
+  storeHours: Joi.object().unknown(true).optional(),
+  orderSeq: Joi.number().integer().min(1000).optional(),
+  updatedAt: Joi.number().optional(),
 }).unknown(true);
 
 // metrics/daily/{YYYY-MM-DD} and metrics/monthly/{YYYY-MM}

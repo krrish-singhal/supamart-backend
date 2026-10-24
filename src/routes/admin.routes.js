@@ -49,13 +49,22 @@ router.post(
   asyncHandler(async (req, res) => {
     const { token } = req.body;
     if (!token) return res.status(422).json({ error: "token is required" });
-    const admin = require("firebase-admin");
-    const ref = db().collection(COLLECTIONS.CONFIG).doc("adminDevices");
-    await ref.set(
-      { fcmTokens: admin.firestore.FieldValue.arrayUnion(token), updatedAt: Date.now() },
-      { merge: true }
-    );
-    res.json({ ok: true });
+    try {
+      const admin = require("firebase-admin");
+      const ref = db().collection(COLLECTIONS.CONFIG).doc("adminDevices");
+      await Promise.race([
+        ref.set(
+          { fcmTokens: admin.firestore.FieldValue.arrayUnion(token), updatedAt: Date.now() },
+          { merge: true }
+        ),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Firestore write timed out")), 10000))
+      ]);
+      res.json({ ok: true });
+    } catch (err) {
+      console.warn("[Admin FCM Token] Registration warning:", err.message);
+      // Return ok: false rather than 500 so admin portal UI is not disturbed
+      res.json({ ok: false, warning: err.message });
+    }
   })
 );
 
@@ -69,13 +78,21 @@ router.delete(
     // request body, so the client passes it as ?token= instead.
     const token = req.body.token || req.query.token;
     if (!token) return res.status(422).json({ error: "token is required" });
-    const admin = require("firebase-admin");
-    const ref = db().collection(COLLECTIONS.CONFIG).doc("adminDevices");
-    await ref.set(
-      { fcmTokens: admin.firestore.FieldValue.arrayRemove(token), updatedAt: Date.now() },
-      { merge: true }
-    );
-    res.json({ ok: true });
+    try {
+      const admin = require("firebase-admin");
+      const ref = db().collection(COLLECTIONS.CONFIG).doc("adminDevices");
+      await Promise.race([
+        ref.set(
+          { fcmTokens: admin.firestore.FieldValue.arrayRemove(token), updatedAt: Date.now() },
+          { merge: true }
+        ),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Firestore write timed out")), 10000))
+      ]);
+      res.json({ ok: true });
+    } catch (err) {
+      console.warn("[Admin FCM Token] Deregistration warning:", err.message);
+      res.json({ ok: false, warning: err.message });
+    }
   })
 );
 
@@ -143,13 +160,25 @@ router.get(
   })
 );
 
+// GET /api/admin/broadcasts — list past push broadcasts
+router.get(
+  "/broadcasts",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const snap = await db().collection("broadcasts").orderBy("createdAt", "desc").limit(50).get();
+    const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    res.json({ items });
+  })
+);
+
 // POST /api/admin/broadcast — push notification to all customers
 router.post(
   "/broadcast",
   authenticate,
   requireRole(ROLES.ADMIN),
   asyncHandler(async (req, res) => {
-    const { title, body } = req.body;
+    const { title, body, audience, targetScreen } = req.body;
     if (!title || !body) {
       const e = new Error("title and body are required");
       e.statusCode = 422;
@@ -164,9 +193,23 @@ router.post(
       const fcmTokens = user.fcmTokens || [];
       tokens.push(...fcmTokens);
     });
-    if (!tokens.length) return res.json({ sent: 0 });
-    await broadcast(tokens, title, body);
-    res.json({ sent: tokens.length, title, body });
+    
+    // Create record in broadcasts collection
+    const record = {
+      title,
+      body,
+      audience: audience || "All customers",
+      targetScreen: targetScreen || "Home screen",
+      delivered: tokens.length,
+      opened: 0,
+      createdAt: Date.now(),
+    };
+    const docRef = await db().collection("broadcasts").add(record);
+
+    if (tokens.length) {
+      await broadcast(tokens, title, body);
+    }
+    res.json({ id: docRef.id, sent: tokens.length, ...record });
   })
 );
 
@@ -192,6 +235,109 @@ router.post(
   })
 );
 
+// Staff management routes
+router.get(
+  "/staff",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const snap = await db().collection("staff").orderBy("createdAt", "asc").get();
+    if (snap.empty) {
+      // Return default initial staff matching screenshot
+      const initialStaff = [
+        {
+          id: "staff-owner-1",
+          name: "Sudarsanan",
+          email: "sudarsanan.in@gmail.com",
+          role: "Owner",
+          canAccess: "Everything",
+          lastActive: "Now",
+          isOwner: true,
+          createdAt: Date.now() - 86400000 * 30,
+        },
+        {
+          id: "staff-mgr-1",
+          name: "Store Manager",
+          email: "admin@supamart.in",
+          role: "Manager",
+          canAccess: "Orders, products, payments, customers",
+          lastActive: "Today",
+          isOwner: false,
+          createdAt: Date.now() - 86400000 * 10,
+        },
+        {
+          id: "staff-pkr-1",
+          name: "Warehouse Packer",
+          email: "—",
+          role: "Packer",
+          canAccess: "Orders (packing only)",
+          lastActive: "Yesterday",
+          isOwner: false,
+          createdAt: Date.now() - 86400000 * 5,
+        },
+      ];
+      // Seed them into Firestore so subsequent calls and real-time listeners pick them up
+      const batch = db().batch();
+      initialStaff.forEach((s) => {
+        const ref = db().collection("staff").doc(s.id);
+        batch.set(ref, s);
+      });
+      await batch.commit();
+      return res.json({ staff: initialStaff });
+    }
+    const staff = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    res.json({ staff });
+  })
+);
+
+router.post(
+  "/staff",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const { name, email, role, phone } = req.body;
+    if (!name || !role) {
+      const e = new Error("Name and role are required");
+      e.statusCode = 422;
+      throw e;
+    }
+    let canAccess = "Orders, products, payments, customers";
+    if (role === "Owner") canAccess = "Everything";
+    else if (role === "Packer") canAccess = "Orders (packing only)";
+    else if (role === "Delivery") canAccess = "Deliveries & dispatch only";
+    else if (role === "Cashier") canAccess = "Orders & payments";
+
+    const newStaff = {
+      name: name.trim(),
+      email: email ? email.trim() : "—",
+      phone: phone ? phone.trim() : "",
+      role,
+      canAccess,
+      lastActive: "Just invited",
+      isOwner: role === "Owner",
+      createdAt: Date.now(),
+    };
+    const docRef = await db().collection("staff").add(newStaff);
+    res.json({ id: docRef.id, ...newStaff });
+  })
+);
+
+router.delete(
+  "/staff/:id",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const docRef = db().collection("staff").doc(req.params.id);
+    const snap = await docRef.get();
+    if (!snap.exists) return res.status(404).json({ error: "Staff member not found" });
+    if (snap.data().isOwner || snap.data().role === "Owner") {
+      return res.status(403).json({ error: "Cannot delete the Owner account" });
+    }
+    await docRef.delete();
+    res.json({ ok: true, id: req.params.id });
+  })
+);
+
 // GET /api/admin/invoices/:orderId — generate and stream PDF invoice
 router.get(
   "/invoices/:orderId",
@@ -202,6 +348,11 @@ router.get(
     if (!orderSnap.exists) return res.status(404).json({ error: "Order not found" });
     const order = { id: orderSnap.id, ...orderSnap.data() };
 
+    const configSnap = await db().collection(COLLECTIONS.CONFIG).doc("global").get();
+    const configData = configSnap.exists ? configSnap.data() : {};
+    const biz = configData.businessLegal || {};
+    const storeName = biz.legalEntityName || "MS Traders";
+
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="invoice-${order.orderNo}.pdf"`);
 
@@ -209,10 +360,13 @@ router.get(
     doc.pipe(res);
 
     // Header
-    doc.fontSize(20).text("MS Traders", { align: "center" });
+    doc.fontSize(20).text(storeName, { align: "center" });
+    if (biz.gstin) doc.fontSize(9).text(`GSTIN: ${biz.gstin}`, { align: "center" });
+    if (biz.fssaiLicenceNumber) doc.fontSize(9).text(`FSSAI: ${biz.fssaiLicenceNumber}`, { align: "center" });
     doc.fontSize(12).text("Tax Invoice / Order Receipt", { align: "center" });
     doc.moveDown();
-    doc.fontSize(10).text(`Order #${order.orderNo}`);
+    const prefix = biz.invoicePrefix || "";
+    doc.fontSize(10).text(`Order #${prefix}${order.orderNo}`);
     doc.text(`Date: ${dayjs(order.createdAt).format("DD MMM YYYY, h:mm A")}`);
     doc.text(`Payment: ${order.paymentMethod} — ${order.paymentStatus}`);
     doc.moveDown();

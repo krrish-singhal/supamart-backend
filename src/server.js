@@ -47,8 +47,10 @@ app.use("/api/brands", brandsRoutes);
 app.use("/api/banners", bannersRoutes);
 app.use("/api/offers", offersRoutes);
 app.use("/api/products", productsRoutes);
+app.use("/api/reads", require("./routes/reads.routes"));
 
 // Authenticated endpoints (auth checked per-route)
+app.use("/api/users/:uid/shopping-lists", require("./routes/shoppingLists.routes"));
 app.use("/api/users/:uid/addresses", addressesRoutes);
 app.use("/api/users", usersRoutes);
 app.use("/api/cart", cartRoutes);

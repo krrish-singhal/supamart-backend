@@ -1,4 +1,4 @@
-const { STORE_LOCATION, SERVICE_RADIUS_KM } = require('../config/deliveryArea');
+const { STORE_LOCATION, SERVICE_RADIUS_KM, DELIVERY_TIERS } = require('../config/deliveryArea');
 require("dotenv").config();
 const { db } = require("../config/firebase");
 const { COLLECTIONS } = require("../config/constants");
@@ -37,16 +37,10 @@ async function seed() {
       serviceRadiusKm: SERVICE_RADIUS_KM,
       minOrderValue: 200,
       taxPercent: 0,
-      deliveryTiers: [
-        { maxKm: 2, charge: 20 },
-        { maxKm: 5, charge: 40 },
-      ],
-      slots: [
-        { label: "9AM - 11AM", from: "09:00", to: "11:00", active: true },
-        { label: "11AM - 1PM", from: "11:00", to: "13:00", active: true },
-        { label: "4PM - 6PM", from: "16:00", to: "18:00", active: true },
-        { label: "6PM - 8PM", from: "18:00", to: "20:00", active: true },
-      ],
+      deliveryTiers: DELIVERY_TIERS.map(tier => ({ ...tier })),
+      slots: [],
+      deliveryMode: 'ON_DEMAND',
+      storeHours: { opensAt: '10:00', closesAt: '23:00', timeZone: 'Asia/Kolkata' },
       orderSeq: 1000,
       updatedAt: now,
     },

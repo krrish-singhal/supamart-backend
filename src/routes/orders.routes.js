@@ -15,7 +15,7 @@ router.post(
   "/",
   authenticate,
   asyncHandler(async (req, res) => {
-    const { cartItems, couponCode, address, slot, notes, paymentMethod } = req.body;
+    const { cartItems, couponCode, address, notes, paymentMethod } = req.body;
     const idempotencyKey = req.headers["x-idempotency-key"] || null;
     if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
       return res.status(422).json({ error: "cartItems is required" });
@@ -25,7 +25,6 @@ router.post(
       cartItems,
       couponCode: couponCode || null,
       address,
-      slot,
       notes: notes || null,
       paymentMethod,
       idempotencyKey,
@@ -86,6 +85,139 @@ router.get(
     // ones explicitly set to true.
     result.items = result.items.filter((o) => !o.hiddenFromUser);
     res.json(result);
+  })
+);
+
+// Complete purchase history, independent of order-history pagination.
+router.get('/buy-again', authenticate, asyncHandler(async (req, res) => {
+  const { boughtProducts } = require('../services/customerFeatures');
+  const { Products } = require('../models');
+  const snap = await db().collection(COLLECTIONS.ORDERS).where('userId', '==', req.user.uid).get();
+  const rawOrders = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+  const validOrders = rawOrders
+    .filter(order => !order.hiddenFromUser && order.status !== 'CANCELLED' && order.status !== 'PAYMENT_FAILED')
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  const history = boughtProducts(validOrders);
+  const productIds = [...new Set([
+    ...history.map(item => item.productId),
+    ...validOrders.slice(0, 8).flatMap(o => (o.items || []).map(i => i.productId)),
+  ])];
+
+  const catSnap = await db().collection(COLLECTIONS.CATEGORIES).get();
+  const catMap = new Map();
+  catSnap.docs.forEach(d => catMap.set(d.id, d.data().name));
+
+  const current = new Map();
+  // Bound concurrent Firestore reads for accounts with a large purchase history.
+  for (let i = 0; i < productIds.length; i += 20) {
+    await Promise.all(productIds.slice(i, i + 20).map(async id => {
+      const prod = await Products.findById(id);
+      if (prod) {
+        if (prod.categoryId && catMap.has(prod.categoryId)) {
+          prod.categoryName = catMap.get(prod.categoryId);
+          prod.category = prod.categoryName;
+        }
+        current.set(id, prod);
+      }
+    }));
+  }
+
+  // Build lookup map of catalog products by name for fallback matching
+  const nameToProd = new Map();
+  for (const prod of current.values()) {
+    if (prod && prod.name) {
+      nameToProd.set(prod.name.trim().toLowerCase(), prod);
+    }
+  }
+
+  const resolveProduct = (productId, name, fallbackItem = {}) => {
+    if (productId && current.has(productId)) {
+      return current.get(productId);
+    }
+    const cleanName = (name || '').trim().toLowerCase();
+    if (cleanName && nameToProd.has(cleanName)) {
+      return nameToProd.get(cleanName);
+    }
+    // Fallback product constructed from purchase record so items are never lost
+    return {
+      id: productId || `fallback-${cleanName || 'item'}`,
+      name: name || fallbackItem.name || fallbackItem.productName || 'Grocery Item',
+      images: fallbackItem.images || (fallbackItem.image ? [fallbackItem.image] : []),
+      variants: [{
+        id: fallbackItem.variantId || 'default',
+        label: fallbackItem.variantLabel || '1 Unit',
+        price: fallbackItem.lastPrice ?? fallbackItem.price ?? 0,
+        offerPrice: fallbackItem.lastPrice ?? fallbackItem.price ?? 0,
+        stock: 0,
+      }],
+      categoryName: fallbackItem.categoryName || 'Other',
+      category: fallbackItem.categoryName || 'Other',
+      isUnavailable: true,
+    };
+  };
+
+  const recentOrders = validOrders.slice(0, 8).map(order => ({
+    id: order.id,
+    orderNo: order.orderNo || order.id.slice(-5),
+    createdAt: order.createdAt,
+    total: order.total || order.totalAmount || order.pricing?.total || 0,
+    items: (order.items || []).map(it => {
+      const p = resolveProduct(it.productId, it.productName || it.name, it);
+      return {
+        ...it,
+        productName: it.productName || it.name || p?.name || 'Item',
+        images: (it.images && it.images.length > 0) ? it.images : (p?.images || []),
+        product: p,
+      };
+    }),
+  }));
+
+  const items = history.map(item => {
+    const p = resolveProduct(item.productId, item.name, item);
+    return {
+      ...item,
+      product: p,
+    };
+  });
+
+  res.json({
+    items,
+    recentOrders,
+    totalOrdersCount: validOrders.length,
+  });
+}));
+
+router.patch('/:id/ratings', authenticate, asyncHandler(async (req, res) => {
+  const { validateOrderRatings } = require('../services/customerFeatures');
+  const ref = db().collection(COLLECTIONS.ORDERS).doc(req.params.id);
+  const result = await db().runTransaction(async tx => {
+    const snap = await tx.get(ref);
+    const value = validateOrderRatings(snap.exists ? snap.data() : null, req.user.uid, req.body);
+    const ratings = { ...value, ratedAt: Date.now() };
+    tx.update(ref, { ratings, updatedAt: Date.now() });
+    return ratings;
+  });
+  res.json(result);
+}));
+
+// PATCH /api/orders/:id/instructions  (customer updates delivery instructions)
+router.patch(
+  "/:id/instructions",
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const order = await Orders.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (order.userId !== req.user.uid && req.user.role !== ROLES.ADMIN) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const { deliveryInstructions } = req.body;
+    const updated = await Orders.update(req.params.id, {
+      deliveryInstructions,
+      updatedAt: Date.now(),
+    });
+    res.json(updated);
   })
 );
 

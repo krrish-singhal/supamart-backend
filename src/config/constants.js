@@ -57,7 +57,7 @@ const STOCK_LEVEL = { IN_STOCK: "IN_STOCK", LOW_STOCK: "LOW_STOCK", OUT_OF_STOCK
 const LOW_STOCK_THRESHOLD = 10;
 
 // Orders with a cart subtotal at or above this get free delivery (Blinkit/Instamart-style).
-const FREE_DELIVERY_THRESHOLD = 2500;
+const FREE_DELIVERY_THRESHOLD = 3000;
 
 // Reasons an admin can give when rejecting a manually-claimed UPI payment.
 const PAYMENT_REJECTION_REASON = {

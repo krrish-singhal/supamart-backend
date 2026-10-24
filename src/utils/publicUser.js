@@ -2,7 +2,7 @@
 // Every route that returns a user doc to the client must pass it through this first.
 function publicUser(user) {
   if (!user) return user;
-  const { passwordHash, resetPasswordTokenHash, resetPasswordExpires, ...rest } = user;
+  const { passwordHash, resetPasswordTokenHash, resetPasswordExpires, resetPasswordOtp, deleteAccountOtp, deleteAccountOtpExpires, ...rest } = user;
   return rest;
 }
 

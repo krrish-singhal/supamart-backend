@@ -15,7 +15,7 @@ const variantSchema = Joi.object({
   weightValue: Joi.number().min(0).allow(null),
   weightUnit: Joi.string().max(20).allow("", null),
   availability: Joi.string().valid(...Object.values(AVAILABILITY)).allow(null),
-});
+}).unknown(true);
 
 // categories/{categoryId}
 // parentId null = top-level category; set = sub-category shown under its parent
@@ -54,7 +54,7 @@ const productSchema = Joi.object({
   // Some legacy catalog items intentionally use the bundled customer-app fallback
   // photo and therefore have no remote image URLs. Keep the array required, but
   // allow it to be empty so unrelated edits (availability, stock, etc.) validate.
-  images: Joi.array().items(Joi.string().uri()).required(),
+  images: Joi.array().items(Joi.string().allow("", null)).required(),
   variants: Joi.array().items(variantSchema).min(1).required(),
   availability: Joi.string().valid(...Object.values(AVAILABILITY)).default(AVAILABILITY.AVAILABLE),
   isAvailableToday: Joi.boolean().default(true),

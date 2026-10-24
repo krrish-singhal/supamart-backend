@@ -75,15 +75,32 @@ class Repository {
       const startDoc = await this.col().doc(startAfter).get();
       if (startDoc.exists) q = q.startAfter(startDoc);
     }
-    q = q.limit(limit);
-    const snap = await q.get();
-    const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-    const last = snap.docs[snap.docs.length - 1] || null;
-    const hasMore = snap.size === limit;
-    // Only hand back a cursor when there's actually more to fetch — otherwise a short
-    // result set (e.g. a brand with 2 products) still returns a truthy cursor and the
-    // client loops forever calling "load more" against a page that never grows.
-    return { items, cursor: hasMore && last ? last.id : null, hasMore };
+    try {
+      const snap = await q.get();
+      const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const last = snap.docs[snap.docs.length - 1] || null;
+      const hasMore = snap.size === limit;
+      // Only hand back a cursor when there's actually more to fetch — otherwise a short
+      // result set (e.g. a brand with 2 products) still returns a truthy cursor and the
+      // client loops forever calling "load more" against a page that never grows.
+      return { items, cursor: hasMore && last ? last.id : null, hasMore };
+    } catch (err) {
+      if (err.code === 9 && orderBy) {
+        console.warn(`[Firestore] Missing composite index for query; falling back to in-memory sorting:`, err.message);
+        let fallbackQ = this.col();
+        where.forEach(([f, op, v]) => (fallbackQ = fallbackQ.where(f, op, v)));
+        fallbackQ = fallbackQ.limit(limit);
+        const snap = await fallbackQ.get();
+        const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        if (orderBy.dir === "desc") {
+          items.sort((a, b) => (b[orderBy.field] || 0) - (a[orderBy.field] || 0));
+        } else {
+          items.sort((a, b) => (a[orderBy.field] || 0) - (b[orderBy.field] || 0));
+        }
+        return { items, cursor: null, hasMore: false };
+      }
+      throw err;
+    }
   }
 }
 
