@@ -1,10 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { readSmtpConfig, smtpFailure } = require('../src/services/smtpTransport');
-const credentials = { SMTP_HOST: 'smtp.gmail.com', SMTP_USER: 'sender@example.test', SMTP_PASS: 'abcdefghijklmnop' };
+const credentials = { SMTP_HOST: 'smtp.gmail.com', SMTP_USER: 'sender@example.test', SMTP_PASS: 'mocktestpass' };
 test('Gmail App Password paste formatting is normalized with trimmed SMTP host and user', () => {
-  const options = readSmtpConfig({ ...credentials, SMTP_HOST: ' smtp.gmail.com ', SMTP_USER: ' sender@example.test ', SMTP_PASS: '"abcd efgh ijkl mnop"' });
-  assert.equal(options.auth.pass, 'abcdefghijklmnop'); assert.equal(options.auth.user, credentials.SMTP_USER);
+  const options = readSmtpConfig({ ...credentials, SMTP_HOST: ' smtp.gmail.com ', SMTP_USER: ' sender@example.test ', SMTP_PASS: '"mock test pass"' });
+  assert.equal(options.auth.pass, 'mocktestpass'); assert.equal(options.auth.user, credentials.SMTP_USER);
   assert.equal(options.host, credentials.SMTP_HOST); assert.equal(options.port, 587); assert(options.requireTLS); assert(!options.secure);
 });
 test('465 uses implicit TLS, and non-Gmail passwords retain significant whitespace', () => {
