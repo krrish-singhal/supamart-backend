@@ -524,6 +524,27 @@ router.get(
   })
 );
 
+// POST /api/auth/fcm-token — add / update FCM token for user
+router.post(
+  "/fcm-token",
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const { token } = req.body;
+    if (!token) return res.status(422).json({ error: "Token is required" });
+    const user = await Users.findById(req.user.uid);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    let fcmTokens = user.fcmTokens || [];
+    if (!fcmTokens.includes(token)) {
+      fcmTokens = [...fcmTokens, token].slice(-5);
+      await db()
+        .collection(COLLECTIONS.USERS)
+        .doc(req.user.uid)
+        .update({ fcmTokens, updatedAt: Date.now() });
+    }
+    res.json({ ok: true, fcmTokens });
+  })
+);
+
 // DELETE /api/auth/fcm-token — remove a specific FCM token (on logout)
 router.delete(
   "/fcm-token",

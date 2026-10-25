@@ -358,6 +358,11 @@ async function updateStatus(orderId, nextStatus, user) {
     notifyUser(order.userId, title, body, { type: "ORDER_STATUS", status: nextStatus, orderId }).catch(e => console.error(e));
   }
 
+  try {
+    const { invalidateReadsCache } = require("../routes/reads.routes");
+    invalidateReadsCache(orderId);
+  } catch (_) {}
+
   return { id: orderId, status: nextStatus };
 }
 

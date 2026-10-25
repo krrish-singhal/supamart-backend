@@ -148,14 +148,17 @@ router.patch(
       lastSyncedAt: now,
       updatedAt: now,
     };
-    const updated = await DeliveryPartners.update(req.params.uid, update);
+    await db()
+      .collection(COLLECTIONS.DELIVERY_PARTNERS)
+      .doc(req.params.uid)
+      .set(update, { merge: true });
 
     // Sync to active order(s) so customer & admin get live coordinates in real-time
     try {
       const activeOrdersSnap = await db()
         .collection(COLLECTIONS.ORDERS)
         .where("assignedPartnerId", "==", req.params.uid)
-        .where("status", "in", [ORDER_STATUS.OUT_FOR_DELIVERY, ORDER_STATUS.ORDER_ACCEPTED, ORDER_STATUS.PLACED])
+        .where("status", "in", [ORDER_STATUS.OUT_FOR_DELIVERY, ORDER_STATUS.ACCEPTED, ORDER_STATUS.PLACED])
         .get();
 
       if (!activeOrdersSnap.empty) {
@@ -173,7 +176,7 @@ router.patch(
       console.warn("Failed to sync partner location to active order:", syncErr.message);
     }
 
-    res.json(updated);
+    res.json({ id: req.params.uid, ...update });
   })
 );
 

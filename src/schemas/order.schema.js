@@ -130,9 +130,9 @@ const offerSchema = Joi.object({
 
 // deliveryPartners/{uid}
 const deliveryPartnerSchema = Joi.object({
-  name: Joi.string().required(),
-  email: Joi.string().email().required(),
-  mobile: Joi.string().pattern(/^[0-9]{10}$/).required(),
+  name: Joi.string().allow("", null).optional(),
+  email: Joi.string().email().allow("", null).optional(),
+  mobile: Joi.string().allow("", null).optional(),
   isActive: Joi.boolean().default(true),
   isOnDuty: Joi.boolean().default(true),
   dutyStatus: Joi.string().allow("", null),
@@ -145,7 +145,7 @@ const deliveryPartnerSchema = Joi.object({
   }).allow(null).default(null),
   lastSyncedAt: Joi.number().allow(null),
   updatedAt: Joi.number().allow(null),
-  createdAt: Joi.number().required(),
+  createdAt: Joi.number().allow(null).optional(),
 });
 
 module.exports = {

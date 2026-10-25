@@ -79,14 +79,11 @@ router.post('/', optionalAuthenticate, asyncHandler(async (req, res) => {
       return res.json(responseData);
     } catch (err) {
       if (err.statusCode === 403) throw err;
-      if (err.code === 8 || err.message?.includes('Quota exceeded')) {
-        console.warn(`Firestore quota exceeded on doc read: ${path}`);
-        if (cacheKey && readsCache.has(cacheKey)) {
-          return res.json(readsCache.get(cacheKey).data);
-        }
-        return res.json({ document: null });
+      console.warn(`Firestore read failure on doc: ${path}:`, err.message || err);
+      if (cacheKey && readsCache.has(cacheKey)) {
+        return res.json(readsCache.get(cacheKey).data);
       }
-      throw err;
+      return res.json({ document: null });
     }
   }
 
@@ -130,15 +127,26 @@ router.post('/', optionalAuthenticate, asyncHandler(async (req, res) => {
     res.json(responseData);
   } catch (err) {
     if (err.statusCode === 403 || err.statusCode === 422) throw err;
-    if (err.code === 8 || err.message?.includes('Quota exceeded')) {
-      console.warn(`Firestore quota exceeded on collection read: ${path}`);
-      if (cacheKey && readsCache.has(cacheKey)) {
-        return res.json(readsCache.get(cacheKey).data);
-      }
-      return res.json({ documents: [], nextCursor: null });
+    console.warn(`Firestore read failure on collection: ${path}:`, err.message || err);
+    if (cacheKey && readsCache.has(cacheKey)) {
+      return res.json(readsCache.get(cacheKey).data);
     }
-    throw err;
+    return res.json({ documents: [], nextCursor: null });
   }
 }));
 
+function invalidateReadsCache(pathSubstring) {
+  if (!pathSubstring) {
+    readsCache.clear();
+    return;
+  }
+  for (const key of readsCache.keys()) {
+    if (key.includes(pathSubstring)) {
+      readsCache.delete(key);
+    }
+  }
+}
+
+router.invalidateReadsCache = invalidateReadsCache;
 module.exports = router;
+module.exports.invalidateReadsCache = invalidateReadsCache;

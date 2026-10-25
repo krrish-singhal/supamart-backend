@@ -18,7 +18,9 @@ function initFirebase() {
   });
 
   try {
-    admin.firestore().settings({ preferRest: true });
+    if (process.env.FIRESTORE_PREFER_REST === "true") {
+      admin.firestore().settings({ preferRest: true });
+    }
   } catch (_e) {
     // Ignore if already set
   }

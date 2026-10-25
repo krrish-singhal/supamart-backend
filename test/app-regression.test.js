@@ -88,4 +88,63 @@ test("Application Regression Test Suite", async (t) => {
     const res = await fetch(`${baseUrl}/api/auth/firebase-token`);
     assert.strictEqual(res.status, 401);
   });
+
+  await t.test("Delivery delay: requires partner or admin role", async () => {
+    const customerToken = createToken("cust-1", ROLES.CUSTOMER);
+    const res = await fetch(`${baseUrl}/api/orders/order-123/delivery-delay`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${customerToken}`,
+      },
+      body: JSON.stringify({ newEstimatedTime: "25 mins", delayReason: "Traffic" }),
+    });
+    assert.strictEqual(res.status, 403);
+  });
+
+  await t.test("Delivery delay: validates mandatory time and reason for partner", async () => {
+    const partnerToken = createToken("partner-1", ROLES.PARTNER);
+    const res = await fetch(`${baseUrl}/api/orders/order-123/delivery-delay`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${partnerToken}`,
+      },
+      body: JSON.stringify({ newEstimatedTime: "" }),
+    });
+    assert.strictEqual(res.status, 422);
+  });
+
+  await t.test("Delivery delay: handles non-existent order safely without 500 error", async () => {
+    const partnerToken = createToken("partner-1", ROLES.PARTNER);
+    const res = await fetch(`${baseUrl}/api/orders/non-existent-order/delivery-delay`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${partnerToken}`,
+      },
+      body: JSON.stringify({ newEstimatedTime: "30 mins", delayReason: "Heavy Rain" }),
+    });
+    assert.strictEqual(res.status, 404);
+  });
+
+  await t.test("FCM Token: POST /fcm-token requires auth and validates input", async () => {
+    const noAuthRes = await fetch(`${baseUrl}/api/auth/fcm-token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: "sample-fcm-token" }),
+    });
+    assert.strictEqual(noAuthRes.status, 401);
+
+    const customerToken = createToken("cust-1", ROLES.CUSTOMER);
+    const missingTokenRes = await fetch(`${baseUrl}/api/auth/fcm-token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${customerToken}`,
+      },
+      body: JSON.stringify({}),
+    });
+    assert.strictEqual(missingTokenRes.status, 422);
+  });
 });

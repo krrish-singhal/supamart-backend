@@ -3,10 +3,11 @@ const { asyncHandler } = require("../middleware/error");
 const { authenticate, requireRole } = require("../middleware/auth");
 const { placeOrder, updateStatus, markPaymentClaimed, markPaid, rejectPayment, hideOrderForUser, confirmDelivery, disputeDelivery } = require("../services/orderService");
 const { createPayment } = require("../services/paymentService");
-const { sendOwnerWhatsApp, notifyAdminsNewOrder } = require("../services/notificationService");
-const { Orders, DeliveryPartners } = require("../models");
+const { sendOwnerWhatsApp, notifyAdminsNewOrder, notifyUser } = require("../services/notificationService");
+const { Orders, DeliveryPartners, Users } = require("../models");
 const { db } = require("../config/firebase");
 const { ROLES, ORDER_STATUS, COLLECTIONS, REFUND_STATUS } = require("../config/constants");
+const { invalidateReadsCache } = require("./reads.routes");
 
 const router = express.Router();
 
@@ -231,6 +232,7 @@ router.patch(
       deliveryInstructions,
       updatedAt: Date.now(),
     });
+    invalidateReadsCache(req.params.id);
     res.json(updated);
   })
 );
@@ -449,6 +451,7 @@ router.patch(
       updatedAt: Date.now(),
     };
     const updated = await Orders.update(req.params.id, updatePayload);
+    invalidateReadsCache(req.params.id);
 
     if (partnerId) {
       notifyUser(
@@ -485,6 +488,7 @@ router.patch(
       updatedAt: now,
     };
     const updated = await Orders.update(req.params.id, updatePayload);
+    invalidateReadsCache(req.params.id);
 
     // Notify customer that delivery boy is on the way
     notifyUser(
@@ -515,6 +519,7 @@ router.patch(
       updatedAt: now,
     };
     const updated = await Orders.update(req.params.id, updatePayload);
+    invalidateReadsCache(req.params.id);
     res.json(updated);
   })
 );
@@ -525,17 +530,17 @@ router.patch(
   authenticate,
   requireRole(ROLES.PARTNER, ROLES.ADMIN),
   asyncHandler(async (req, res) => {
-    const order = await Orders.findById(req.params.id);
-    if (!order) return res.status(404).json({ error: "Order not found" });
-    if (req.user.role === ROLES.PARTNER && order.assignedPartnerId !== req.user.uid) {
-      return res.status(403).json({ error: "Forbidden: Order not assigned to you" });
-    }
-
     const { newEstimatedTime, delayReason } = req.body;
     if (!newEstimatedTime || !delayReason || !String(delayReason).trim()) {
       return res.status(422).json({
         error: "Both new delivery time and delay reason are mandatory.",
       });
+    }
+
+    const order = await Orders.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (req.user.role === ROLES.PARTNER && order.assignedPartnerId !== req.user.uid) {
+      return res.status(403).json({ error: "Forbidden: Order not assigned to you" });
     }
 
     const cleanReason = String(delayReason).trim();
@@ -552,6 +557,9 @@ router.patch(
       }
     }
 
+    const updatedBy = req.user.role === ROLES.ADMIN ? "Store Admin" : "Delivery Partner";
+    const displayOrderNo = order.orderNo || order.displayId || (req.params.id ? req.params.id.slice(-4) : "---");
+
     const updatePayload = {
       delayReason: cleanReason,
       delayReportedAt: now,
@@ -559,32 +567,53 @@ router.patch(
         newEstimatedTime: String(newEstimatedTime),
         delayReason: cleanReason,
         reportedAt: now,
+        reportedBy: updatedBy,
       },
       estimatedDeliveryAt: newEtaTimestamp,
       updatedAt: now,
     };
 
     const updated = await Orders.update(req.params.id, updatePayload);
+    invalidateReadsCache(req.params.id);
 
     // 1. Auto-shoot email to customer (mandatory default task)
     const { sendDeliveryDelayEmail } = require("../services/emailService");
-    if (order.userEmail) {
-      sendDeliveryDelayEmail(order.userEmail, {
-        orderNo: order.orderNo,
-        customerName: order.userName || "Customer",
+    let targetEmail = order.userEmail || order.email || order.addressSnapshot?.email;
+    let targetName = order.userName || order.name || order.addressSnapshot?.name || "Customer";
+    if (!targetEmail && order.userId) {
+      try {
+        const uSnap = await db().collection(COLLECTIONS.USERS).doc(order.userId).get();
+        if (uSnap.exists) {
+          const uData = uSnap.data();
+          targetEmail = uData.email || uData.userEmail;
+          if ((!order.userName || order.userName === "Customer") && uData.name) {
+            targetName = uData.name;
+          }
+        }
+      } catch (e) {
+        console.error("Could not fetch user email for delay notification:", e);
+      }
+    }
+
+    if (targetEmail) {
+      sendDeliveryDelayEmail(targetEmail, {
+        orderNo: displayOrderNo,
+        customerName: targetName,
         newEstimatedTime: String(newEstimatedTime),
         delayReason: cleanReason,
+        updatedBy,
       }).catch((err) => console.error("Auto delay email failed:", err));
     }
 
     // 2. Real-time in-app notification & push to customer
     notifyUser(
       order.userId,
-      `Delivery Update: Order #${order.orderNo}`,
+      `Delivery Update: Order #${displayOrderNo}`,
       `Your order is delayed due to: ${cleanReason}. Expected delivery: ${newEstimatedTime}.`,
       {
         type: "DELIVERY_DELAY",
         orderId: req.params.id,
+        orderNo: displayOrderNo,
         delayReason: cleanReason,
         newEstimatedTime: String(newEstimatedTime),
       }

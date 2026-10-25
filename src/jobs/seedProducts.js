@@ -347,12 +347,8 @@ function buildOffers(categoryMap) {
 }
 
 // ---------------------------------------------------------------------------
-// Delivery Partners
+// Delivery Partners: Managed via backend API / Auth only (no static fake partners)
 // ---------------------------------------------------------------------------
-const DELIVERY_PARTNERS = [
-  { name: "Ravi Kumar", mobile: "9876543210", isActive: true, fcmTokens: [], currentOrders: [] },
-  { name: "Suresh Yadav", mobile: "9123456780", isActive: true, fcmTokens: [], currentOrders: [] },
-];
 
 // Deletes every doc in a collection, batched (Firestore batch cap is 500 ops).
 async function deleteCollection(firestore, collectionName) {
@@ -479,21 +475,6 @@ async function seedProducts() {
   await offerBatch.commit();
   console.log(`  ✓ ${offers.length} offers seeded`);
 
-  // ── 7. Seed delivery partners (idempotent) ─────────────────────────────────
-  console.log("\nSeeding delivery partners...");
-  const partnerCountSnap = await firestore.collection(COLLECTIONS.DELIVERY_PARTNERS).limit(1).get();
-  if (!partnerCountSnap.empty) {
-    console.log("  [SKIP] Delivery partners already exist");
-  } else {
-    const partnerBatch = firestore.batch();
-    DELIVERY_PARTNERS.forEach((partner) => {
-      const docRef = firestore.collection(COLLECTIONS.DELIVERY_PARTNERS).doc();
-      partnerBatch.set(docRef, { ...partner, createdAt: now });
-    });
-    await partnerBatch.commit();
-    console.log(`  ✓ ${DELIVERY_PARTNERS.length} delivery partners seeded`);
-  }
-
   await firestore.collection(COLLECTIONS.CONFIG).doc("global").set(
     { productsSeeded: true, productsSeededAt: now },
     { merge: true }
@@ -505,7 +486,6 @@ async function seedProducts() {
   console.log(`  Brands   : ${requiredBrands.length} referenced (${Object.keys(brandMap).length} total in DB)`);
   console.log(`  Banners  : ${BANNERS.length}`);
   console.log(`  Offers   : ${offers.length}`);
-  console.log(`  Partners : ${DELIVERY_PARTNERS.length}`);
   console.log("============================================================\n");
 
   process.exit(0);
