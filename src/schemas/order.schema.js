@@ -62,6 +62,8 @@ const orderSchema = Joi.object({
   tax: Joi.number().min(0).default(0),
   deliveryCharge: Joi.number().min(0).default(0),
   discount: Joi.number().min(0).default(0),
+  couponCode: Joi.string().allow("", null),
+  couponId: Joi.string().allow("", null),
   total: Joi.number().min(0).required(),
   distanceKm: Joi.number().min(0).required(),
   status: Joi.string().valid(...Object.values(ORDER_STATUS), "PACKING", "PENDING", "READY_FOR_DELIVERY").default(ORDER_STATUS.PLACED),

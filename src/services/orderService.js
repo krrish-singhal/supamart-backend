@@ -54,15 +54,42 @@ async function placeOrder({ userId, cartItems, couponCode, address, notes, payme
   // Resolve coupon OUTSIDE the transaction (Admin SDK tx.get() only accepts doc refs, not queries)
   let offerRef = null;
   let offerData = null;
-  if (couponCode) {
+  const cleanCouponCode = couponCode ? String(couponCode).trim().toUpperCase() : null;
+  if (cleanCouponCode) {
     const offSnap = await db()
       .collection(COLLECTIONS.OFFERS)
-      .where("code", "==", couponCode.toUpperCase())
+      .where("code", "==", cleanCouponCode)
       .limit(1)
       .get();
-    if (!offSnap.empty) {
-      offerRef = offSnap.docs[0].ref;
-      offerData = { id: offSnap.docs[0].id, ...offSnap.docs[0].data() };
+    if (offSnap.empty) {
+      throw Object.assign(new Error("Invalid or expired coupon"), {
+        statusCode: 422,
+        code: "INVALID_COUPON",
+      });
+    }
+
+    offerRef = offSnap.docs[0].ref;
+    offerData = { id: offSnap.docs[0].id, ...offSnap.docs[0].data() };
+
+    const now = Date.now();
+    if (
+      !offerData.isActive ||
+      (offerData.validFrom && now < offerData.validFrom) ||
+      (offerData.validTo && now > offerData.validTo)
+    ) {
+      throw Object.assign(new Error("Invalid or expired coupon"), {
+        statusCode: 422,
+        code: "INVALID_COUPON",
+      });
+    }
+
+    const { hasUserUsedCoupon } = require("./couponService");
+    const alreadyUsed = await hasUserUsedCoupon(userId, cleanCouponCode);
+    if (alreadyUsed) {
+      throw Object.assign(
+        new Error("You have already used this coupon code. Each coupon can only be used once."),
+        { statusCode: 422, code: "COUPON_ALREADY_USED" }
+      );
     }
   }
 
@@ -150,13 +177,35 @@ async function placeOrder({ userId, cartItems, couponCode, address, notes, payme
     if (offerRef) {
       const offerSnap = await tx.get(offerRef);
       const offer = offerSnap.exists ? { id: offerSnap.id, ...offerSnap.data() } : null;
+      if (!offer || !offer.isActive) {
+        throw Object.assign(new Error("Invalid or expired coupon"), {
+          statusCode: 422,
+          code: "INVALID_COUPON",
+        });
+      }
       discount = computeDiscount(offer, subtotal, items, products);
     }
 
     // customer info snapshot — denormalized onto the order so admin tooling never has
     // to join against users/{uid} just to show who placed it (same idea as addressSnapshot).
-    const userSnap = await tx.get(db().collection(COLLECTIONS.USERS).doc(userId));
+    const userRef = db().collection(COLLECTIONS.USERS).doc(userId);
+    const userSnap = await tx.get(userRef);
     const userData = userSnap.exists ? userSnap.data() : {};
+
+    // Atomic concurrency check: ensure coupon was not used concurrently
+    if (cleanCouponCode) {
+      const usedSubRef = userRef.collection("usedCoupons").doc(cleanCouponCode);
+      const usedSubSnap = await tx.get(usedSubRef);
+      if (
+        usedSubSnap.exists ||
+        (Array.isArray(userData.usedCoupons) && userData.usedCoupons.includes(cleanCouponCode))
+      ) {
+        throw Object.assign(
+          new Error("You have already used this coupon code. Each coupon can only be used once."),
+          { statusCode: 422, code: "COUPON_ALREADY_USED" }
+        );
+      }
+    }
 
     const taxed = subtotal - discount;
     const tax = applyTax(taxed, config.taxPercent);
@@ -190,6 +239,8 @@ async function placeOrder({ userId, cartItems, couponCode, address, notes, payme
       userEmail: userData.email || null,
       userPhone: userData.mobile || null,
       items,
+      couponCode: cleanCouponCode || null,
+      couponId: offerData?.id || null,
       addressSnapshot: address,
       deliveryMode: "ON_DEMAND",
       notes: notes || null,
@@ -210,6 +261,12 @@ async function placeOrder({ userId, cartItems, couponCode, address, notes, payme
       updatedAt: now,
     };
     tx.set(orderRef, order);
+
+    // mark coupon as used atomically
+    if (cleanCouponCode) {
+      const { markCouponUsedInTx } = require("./couponService");
+      markCouponUsedInTx(tx, userId, cleanCouponCode, orderRef.id, offerData?.id, discount);
+    }
 
     // bump order sequence
     tx.update(cfgRef, { orderSeq: orderNo, updatedAt: now });
@@ -278,6 +335,9 @@ function assertValidTransition(from, to) {
   if (from === 'PACKING' || from === 'READY_FOR_DELIVERY') {
     normalizedFrom = ORDER_STATUS.ACCEPTED;
   }
+
+  // Idempotent: re-accepting or confirming an order that is already in target status succeeds quietly
+  if (from === to || normalizedFrom === to) return true;
 
   const fi = ORDER_STATUS_FLOW.indexOf(normalizedFrom);
   const ti = ORDER_STATUS_FLOW.indexOf(to);
@@ -348,6 +408,10 @@ async function updateStatus(orderId, nextStatus, user) {
       tx.set(dayRef, { delivered: inc(1), pending: inc(-1), updatedAt: now }, { merge: true });
     } else if (nextStatus === ORDER_STATUS.CANCELLED) {
       tx.set(dayRef, { cancelled: inc(1), pending: inc(-1), updatedAt: now }, { merge: true });
+      if (order.couponCode) {
+        const { releaseCouponInTx } = require("./couponService");
+        releaseCouponInTx(tx, order.userId, order.couponCode, order.couponId);
+      }
     }
     return { ...order, id: orderId, status: nextStatus };
   });
@@ -370,7 +434,7 @@ async function updateStatus(orderId, nextStatus, user) {
 // The shop/admin still has to verify the payment and mark it PAID (via /:id/status or admin tools).
 async function markPaymentClaimed(orderId, userId) {
   const ref = db().collection(COLLECTIONS.ORDERS).doc(orderId);
-  return db().runTransaction(async (tx) => {
+  const res = await db().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) throw Object.assign(new Error("Order not found"), { statusCode: 404 });
     const order = snap.data();
@@ -403,10 +467,22 @@ async function markPaymentClaimed(orderId, userId) {
         ...(order.statusHistory || []),
         { status: ORDER_STATUS.PLACED, at: now, note: "Customer retried payment" },
       ];
+      if (order.couponCode) {
+        const { markCouponUsedInTx } = require("./couponService");
+        markCouponUsedInTx(tx, order.userId, order.couponCode, orderId, order.couponId, order.discount || 0);
+      }
     }
     tx.update(ref, updateData);
     return { id: orderId, paymentStatus: PAYMENT_STATUS.AWAITING_CONFIRMATION, status: updateData.status || order.status };
   });
+
+  try {
+    const { invalidateReadsCache } = require("../routes/reads.routes");
+    invalidateReadsCache(orderId);
+    if (userId) invalidateReadsCache(userId);
+  } catch (_) {}
+
+  return res;
 }
 
 // Customer removes an order from their own order-history list — doesn't delete the
@@ -445,8 +521,15 @@ async function markPaid(orderId) {
       );
     }
     const now = Date.now();
-    tx.update(ref, { paymentStatus: PAYMENT_STATUS.PAID, updatedAt: now });
-    return { ...current, id: orderId, paymentStatus: PAYMENT_STATUS.PAID };
+    const updates = { paymentStatus: PAYMENT_STATUS.PAID, updatedAt: now };
+    let newStatus = current.status;
+    if (current.status === ORDER_STATUS.ORDER_PLACED || !current.status) {
+      newStatus = ORDER_STATUS.ORDER_ACCEPTED;
+      updates.status = ORDER_STATUS.ORDER_ACCEPTED;
+      updates.statusHistory = [...(current.statusHistory || []), { status: ORDER_STATUS.ORDER_ACCEPTED, at: now }];
+    }
+    tx.update(ref, updates);
+    return { ...current, id: orderId, paymentStatus: PAYMENT_STATUS.PAID, status: newStatus };
   });
 
   if (!order.alreadyPaid) {
@@ -456,6 +539,14 @@ async function markPaid(orderId) {
       `Your order #${order.orderNo} is confirmed — it'll be delivered to your doorstep soon.`,
       { type: "PAYMENT_APPROVED", orderId }
     ).catch(e => console.error(e));
+  }
+
+  try {
+    const { invalidateReadsCache } = require("../routes/reads.routes");
+    invalidateReadsCache(orderId);
+    if (order?.userId) invalidateReadsCache(order.userId);
+  } catch (e) {
+    console.error("Cache invalidation error:", e);
   }
 
   return { id: orderId, paymentStatus: PAYMENT_STATUS.PAID };
@@ -533,6 +624,11 @@ async function rejectPayment(orderId, reason, customReason) {
       tx.delete(db().collection("orderIdempotency").doc(current.idempotencyKey));
     }
 
+    if (current.couponCode) {
+      const { releaseCouponInTx } = require("./couponService");
+      releaseCouponInTx(tx, current.userId, current.couponCode, current.couponId);
+    }
+
     return { ...current, id: orderId };
   });
 
@@ -542,6 +638,14 @@ async function rejectPayment(orderId, reason, customReason) {
     reasonText,
     { type: "PAYMENT_REJECTED", orderId }
   ).catch(e => console.error(e));
+
+  try {
+    const { invalidateReadsCache } = require("../routes/reads.routes");
+    invalidateReadsCache(orderId);
+    if (order?.userId) invalidateReadsCache(order.userId);
+  } catch (e) {
+    console.error("Cache invalidation error:", e);
+  }
 
   return { id: orderId, paymentStatus: PAYMENT_STATUS.FAILED, status: ORDER_STATUS.CANCELLED, paymentRejectionReason: reasonText };
 }
@@ -624,6 +728,32 @@ async function disputeDelivery(orderId, userId) {
 
     return { ...orderData, id: orderId, status: ORDER_STATUS.DELIVERY_DISPUTED };
   });
+
+  // Also record this as an active customer issue in COLLECTIONS.ISSUES so Admin Portal -> Issues sees it immediately
+  try {
+    const issueData = {
+      orderId,
+      orderNo: order.orderNo || orderId.slice(-4),
+      orderDate: order.createdAt || Date.now(),
+      orderTotal: Number(order.total || order.totalAmount || 0),
+      userId,
+      userName: order.userName || "Customer",
+      userEmail: order.userEmail || "",
+      userPhone: order.userPhone || "",
+      address: order.addressSnapshot || order.address || null,
+      affectedItems: order.items || [],
+      issueType: "Delivery Not Received",
+      photos: [],
+      description: `Customer reported they did not receive Order #${order.orderNo || orderId.slice(-4)}. Partner marked it delivered, but customer disputed delivery.`,
+      resolutionType: "REFUND",
+      status: "OPEN",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await db().collection(COLLECTIONS.ISSUES).add(issueData);
+  } catch (err) {
+    console.error("Failed to sync dispute to issues collection:", err);
+  }
 
   const notification = STATUS_NOTIFICATION[ORDER_STATUS.DELIVERY_DISPUTED];
   if (notification) {

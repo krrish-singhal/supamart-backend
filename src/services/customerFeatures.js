@@ -18,16 +18,30 @@ function validate(schema, input) {
   if (error) throw Object.assign(new Error(error.details.map(d => d.message).join('; ')), { statusCode: 422 });
   return value;
 }
-function validateOrderRatings(order, userId, input) {
+function validateOrderRatings(order, userId, input, userRole = null) {
   if (!order) throw Object.assign(new Error('Order not found'), { statusCode: 404 });
-  if (order.userId !== userId) throw Object.assign(new Error('Forbidden'), { statusCode: 403 });
-  if (order.status !== 'DELIVERED' && order.status !== 'PENDING_CONFIRMATION') throw Object.assign(new Error('You can rate an order after delivery'), { statusCode: 409 });
+  if (userRole !== 'ADMIN' && String(order.userId || '') !== String(userId || '')) {
+    throw Object.assign(new Error('Forbidden'), { statusCode: 403 });
+  }
+  if (order.status !== 'DELIVERED' && order.status !== 'PENDING_CONFIRMATION') {
+    throw Object.assign(new Error('You can rate an order after delivery'), { statusCode: 409 });
+  }
   const value = validate(ratingSchema, input);
-  const purchased = new Set(order.items.map(item => item.productId));
-  const ids = value.productRatings.map(item => item.productId);
-  if (new Set(ids).size !== ids.length || ids.some(id => !purchased.has(id))) {
+  const purchased = new Set(
+    (order.items || []).flatMap((item) => [
+      item.productId,
+      item.id,
+      item._id,
+      String(item.productId || ''),
+      String(item.id || ''),
+    ].filter(Boolean))
+  );
+
+  const ids = (value.productRatings || []).map((item) => String(item.productId));
+  if (new Set(ids).size !== ids.length || ids.some((id) => !purchased.has(id))) {
     throw Object.assign(new Error('Rate each purchased product only once'), { statusCode: 422 });
   }
+
   return value;
 }
 function boughtProducts(orders) {

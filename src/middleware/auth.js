@@ -17,9 +17,14 @@ async function authenticate(req, res, next) {
     // Try Firebase ID token first (admin portal sends these directly)
     try {
       const decoded = await authAdmin().verifyIdToken(token);
+      const isAdminEmail = decoded.email && (
+        decoded.email === "admin@supamart.in" ||
+        decoded.email.toLowerCase() === "krrishsinghal22@gmail.com" ||
+        decoded.email.toLowerCase() === "krrishsinghal62@gmail.com"
+      );
       req.user = {
         uid: decoded.uid,
-        role: decoded.role || ROLES.CUSTOMER,
+        role: decoded.role || (isAdminEmail ? ROLES.ADMIN : ROLES.CUSTOMER),
         email: decoded.email || null,
         phone: decoded.phone_number || null,
       };

@@ -45,10 +45,11 @@ router.post('/', optionalAuthenticate, asyncHandler(async (req, res) => {
   };
   res.set('Cache-Control', 'no-store');
 
-  const ttl = isPublic ? READS_CACHE_TTL_MS : 15_000;
-  const cacheKey = isPublic
+  const isOrderDoc = root === 'orders' && kind === 'doc';
+  const ttl = isOrderDoc ? 0 : (isPublic ? READS_CACHE_TTL_MS : 15_000);
+  const cacheKey = !isOrderDoc ? (isPublic
     ? JSON.stringify({ scope: 'public', path, kind, constraints, cursor })
-    : (uid ? JSON.stringify({ scope: 'private', uid, path, kind, constraints, cursor }) : null);
+    : (uid ? JSON.stringify({ scope: 'private', uid, path, kind, constraints, cursor }) : null)) : null;
 
   if (cacheKey && readsCache.has(cacheKey)) {
     const entry = readsCache.get(cacheKey);

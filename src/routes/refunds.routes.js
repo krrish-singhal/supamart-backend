@@ -2,7 +2,7 @@ const express = require("express");
 const { asyncHandler } = require("../middleware/error");
 const { authenticate, requireRole } = require("../middleware/auth");
 const { db } = require("../config/firebase");
-const { COLLECTIONS, ROLES, REFUND_STATUS } = require("../config/constants");
+const { COLLECTIONS, ROLES, REFUND_STATUS, ISSUE_STATUS } = require("../config/constants");
 const { notifyUser } = require("../services/notificationService");
 
 const router = express.Router();
@@ -94,6 +94,36 @@ router.post(
     };
 
     const docRef = await db().collection(COLLECTIONS.REFUNDS).add(refundData);
+
+    // Sync into issues collection so Admin Portal -> Issues (/issues) shows it immediately
+    try {
+      const issueData = {
+        orderId,
+        orderNo: order.orderNo || "N/A",
+        orderDate: order.createdAt || now,
+        orderTotal: Number(order.total || order.totalAmount || 0),
+        userId: order.userId,
+        userName: order.userName || "Customer",
+        userEmail: order.userEmail || "",
+        userPhone: order.userPhone || "",
+        address: order.address || null,
+        affectedItems: (affectedItems && affectedItems.length > 0) ? affectedItems : (order.items || []),
+        issueType: issueType || reason || "Customer Problem Report",
+        photos: Array.isArray(photos) ? photos : [],
+        description: (description || reason || "Customer reported an issue with order").trim(),
+        resolutionType: "REFUND",
+        refundId: docRef.id,
+        status: ISSUE_STATUS.OPEN,
+        resolutionNotes: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const issueDoc = await db().collection(COLLECTIONS.ISSUES).add(issueData);
+      await docRef.update({ issueId: issueDoc.id });
+    } catch (err) {
+      console.error("Failed to sync issue from refund request:", err);
+    }
+
     res.status(201).json({ id: docRef.id, ...refundData });
   })
 );
@@ -188,6 +218,28 @@ router.patch(
       };
       await ref.update(updatedData);
 
+      // Sync linked issue status
+      try {
+        if (current.issueId) {
+          await db().collection(COLLECTIONS.ISSUES).doc(current.issueId).update({
+            status: ISSUE_STATUS.RESOLVED,
+            resolvedAt: now,
+            updatedAt: now,
+          });
+        } else if (current.orderId) {
+          const issueSnap = await db().collection(COLLECTIONS.ISSUES).where("orderId", "==", current.orderId).limit(1).get();
+          if (!issueSnap.empty) {
+            await issueSnap.docs[0].ref.update({
+              status: ISSUE_STATUS.RESOLVED,
+              resolvedAt: now,
+              updatedAt: now,
+            });
+          }
+        }
+      } catch (err) {
+        console.error("Failed to sync issue on refund approval:", err);
+      }
+
       // Notify customer
       if (current.userId) {
         notifyUser(
@@ -211,6 +263,30 @@ router.patch(
         updatedAt: now,
       };
       await ref.update(updatedData);
+
+      // Sync linked issue status
+      try {
+        if (current.issueId) {
+          await db().collection(COLLECTIONS.ISSUES).doc(current.issueId).update({
+            status: ISSUE_STATUS.REJECTED,
+            resolutionNotes: reasonText,
+            resolvedAt: now,
+            updatedAt: now,
+          });
+        } else if (current.orderId) {
+          const issueSnap = await db().collection(COLLECTIONS.ISSUES).where("orderId", "==", current.orderId).limit(1).get();
+          if (!issueSnap.empty) {
+            await issueSnap.docs[0].ref.update({
+              status: ISSUE_STATUS.REJECTED,
+              resolutionNotes: reasonText,
+              resolvedAt: now,
+              updatedAt: now,
+            });
+          }
+        }
+      } catch (err) {
+        console.error("Failed to sync issue on refund rejection:", err);
+      }
 
       // Notify customer
       if (current.userId) {

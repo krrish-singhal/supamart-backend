@@ -1,0 +1,17 @@
+{
+  "watch": ["src/"],
+  "ext": "js",
+  "ignore": [
+    "*.log",
+    "firestore-debug.log",
+    "tunnel.log",
+    "config_output.json",
+    "offers.json",
+    "node_modules/",
+    "test/",
+    "scripts/",
+    "docs/",
+    "assets/",
+    ".git/"
+  ]
+}

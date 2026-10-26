@@ -192,28 +192,45 @@ router.get('/buy-again', authenticate, asyncHandler(async (req, res) => {
 
 router.patch('/:id/ratings', authenticate, asyncHandler(async (req, res) => {
   const { validateOrderRatings } = require('../services/customerFeatures');
-  const ref = db().collection(COLLECTIONS.ORDERS).doc(req.params.id);
   const now = Date.now();
+  let targetRef = db().collection(COLLECTIONS.ORDERS).doc(req.params.id);
+  const snapCheck = await targetRef.get();
+  if (!snapCheck.exists) {
+    const byNo = await db()
+      .collection(COLLECTIONS.ORDERS)
+      .where("orderNo", "==", Number(req.params.id) || req.params.id)
+      .limit(1)
+      .get();
+    if (!byNo.empty) {
+      targetRef = byNo.docs[0].ref;
+    }
+  }
+
   const result = await db().runTransaction(async tx => {
-    const snap = await tx.get(ref);
+    const snap = await tx.get(targetRef);
     const orderData = snap.exists ? snap.data() : null;
-    const value = validateOrderRatings(orderData, req.user.uid, req.body);
+    const value = validateOrderRatings(orderData, req.user.uid, req.body, req.user.role);
     const ratings = { ...value, ratedAt: now };
-    const updatePayload = { ratings, updatedAt: now };
-    if (orderData && orderData.status === ORDER_STATUS.PENDING_CONFIRMATION) {
+    const updatePayload = {
+      ratings,
+      deliveryRating: value.orderRating || null,
+      deliveryReview: value.review || null,
+      rating: value.orderRating || null,
+      updatedAt: now,
+    };
+    if (orderData && (orderData.status === ORDER_STATUS.PENDING_CONFIRMATION || orderData.status === ORDER_STATUS.OUT_FOR_DELIVERY || orderData.status === ORDER_STATUS.DISPATCHED)) {
       updatePayload.status = ORDER_STATUS.DELIVERED;
       updatePayload.confirmedAt = now;
-      updatePayload.deliveryRating = value.orderRating || null;
-      updatePayload.deliveryReview = value.review || null;
       updatePayload.statusHistory = [...(orderData.statusHistory || []), { status: ORDER_STATUS.DELIVERED, at: now, note: "Confirmed & rated by customer" }];
       const inc = require("firebase-admin").firestore.FieldValue.increment;
       const dayId = require("dayjs")(orderData.createdAt).format("YYYY-MM-DD");
       const dayRef = db().collection(COLLECTIONS.METRICS).doc("daily").collection("days").doc(dayId);
       tx.set(dayRef, { delivered: inc(1), pending: inc(-1), updatedAt: now }, { merge: true });
     }
-    tx.update(ref, updatePayload);
+    tx.update(targetRef, updatePayload);
     return ratings;
   });
+  invalidateReadsCache(targetRef.id);
   res.json(result);
 }));
 
@@ -320,6 +337,7 @@ router.patch(
   requireRole(ROLES.ADMIN),
   asyncHandler(async (req, res) => {
     const result = await markPaid(req.params.id);
+    invalidateReadsCache(req.params.id);
     res.json(result);
   })
 );
@@ -333,6 +351,7 @@ router.patch(
     const { reason, customReason } = req.body;
     if (!reason) return res.status(422).json({ error: "reason is required" });
     const result = await rejectPayment(req.params.id, reason, customReason);
+    invalidateReadsCache(req.params.id);
     res.json(result);
   })
 );

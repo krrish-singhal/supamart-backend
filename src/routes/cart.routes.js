@@ -53,18 +53,30 @@ router.get(
     let discount = 0;
     let couponDetails = null;
     if (cart.couponCode) {
-      const snap = await db()
-        .collection(COLLECTIONS.OFFERS)
-        .where("code", "==", String(cart.couponCode).toUpperCase())
-        .limit(1)
-        .get();
-      const offer = snap.empty ? null : { id: snap.docs[0].id, ...snap.docs[0].data() };
-      discount = computeDiscount(offer, subtotal, pricedItems, productMap);
-      if (offer) {
-        couponDetails = {
-          kind: offer.kind,
-          value: offer.value
-        };
+      const cleanCode = String(cart.couponCode).trim().toUpperCase();
+      const { hasUserUsedCoupon } = require("../services/couponService");
+      const alreadyUsed = await hasUserUsedCoupon(req.user.uid, cleanCode);
+      if (alreadyUsed) {
+        // Clear used coupon from user cart (self-heal)
+        await db().collection(COLLECTIONS.CARTS).doc(req.user.uid).set(
+          { couponCode: null, updatedAt: Date.now() },
+          { merge: true }
+        );
+        cart.couponCode = null;
+      } else {
+        const snap = await db()
+          .collection(COLLECTIONS.OFFERS)
+          .where("code", "==", cleanCode)
+          .limit(1)
+          .get();
+        const offer = snap.empty ? null : { id: snap.docs[0].id, ...snap.docs[0].data() };
+        discount = computeDiscount(offer, subtotal, pricedItems, productMap);
+        if (offer) {
+          couponDetails = {
+            kind: offer.kind,
+            value: offer.value
+          };
+        }
       }
     }
 
@@ -138,6 +150,27 @@ router.patch(
     const { code } = req.body;
     const now = Date.now();
     const cleanCode = code ? String(code).trim().toUpperCase() : null;
+
+    if (cleanCode) {
+      const { hasUserUsedCoupon } = require("../services/couponService");
+      const alreadyUsed = await hasUserUsedCoupon(req.user.uid, cleanCode);
+      if (alreadyUsed) {
+        return res.status(422).json({
+          error: "You have already used this coupon code. Each coupon can only be used once.",
+          code: "COUPON_ALREADY_USED",
+        });
+      }
+
+      const snap = await db()
+        .collection(COLLECTIONS.OFFERS)
+        .where("code", "==", cleanCode)
+        .limit(1)
+        .get();
+      if (snap.empty || !snap.docs[0].data().isActive) {
+        return res.status(422).json({ error: "Invalid or expired coupon" });
+      }
+    }
+
     await db()
       .collection(COLLECTIONS.CARTS)
       .doc(req.user.uid)

@@ -395,4 +395,73 @@ router.get(
   })
 );
 
+// GET /api/admin/ratings — dynamic ratings & reviews summary from database
+router.get(
+  "/ratings",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const snap = await db().collection(COLLECTIONS.ORDERS).get();
+
+    const ratedOrders = [];
+    snap.docs.forEach((doc) => {
+      const data = doc.data();
+      const rating = data.ratings?.orderRating || data.deliveryRating || data.rating;
+      if (typeof rating === "number" && rating > 0) {
+        ratedOrders.push({ id: doc.id, ...data });
+      }
+    });
+
+    ratedOrders.sort((a, b) => {
+      const timeA = a.ratings?.ratedAt || a.updatedAt || a.createdAt || 0;
+      const timeB = b.ratings?.ratedAt || b.updatedAt || b.createdAt || 0;
+      return timeB - timeA;
+    });
+
+    let sum = 0;
+    const starCounts = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
+
+    const reviews = ratedOrders.map((o) => {
+      const star = Math.min(5, Math.max(1, Math.round(o.ratings?.orderRating || o.deliveryRating || o.rating)));
+      starCounts[star] = (starCounts[star] || 0) + 1;
+      sum += star;
+
+      const ratedAt = o.ratings?.ratedAt || o.updatedAt || o.createdAt || Date.now();
+
+      return {
+        id: o.id,
+        orderNo: o.orderNo || o.id?.slice(-4),
+        customerName: o.userName || o.customerName || "Customer",
+        phone: o.userPhone || o.customerPhone || "",
+        rating: star,
+        tags: o.ratings?.tags || o.tags || ["Customer Feedback"],
+        comment: o.ratings?.review || o.deliveryReview || o.comment || "",
+        deliveryFeedback: o.ratings?.deliveryFeedback || null,
+        productRatings: o.ratings?.productRatings || [],
+        items: o.items || [],
+        ratedAt,
+        status: o.status,
+      };
+    });
+
+    const totalRatings = reviews.length;
+    const avgRating = totalRatings > 0 ? (sum / totalRatings).toFixed(1) : "0.0";
+    const breakdown = [
+      { star: 5, count: starCounts[5] || 0, color: "bg-[#0a7c47]" },
+      { star: 4, count: starCounts[4] || 0, color: "bg-[#059669]" },
+      { star: 3, count: starCounts[3] || 0, color: "bg-[#f59e0b]" },
+      { star: 2, count: starCounts[2] || 0, color: "bg-[#ef4444]" },
+      { star: 1, count: starCounts[1] || 0, color: "bg-[#dc2626]" },
+    ];
+
+    res.json({
+      avgRating,
+      totalRatings,
+      breakdown,
+      counts: starCounts,
+      reviews,
+    });
+  })
+);
+
 module.exports = router;

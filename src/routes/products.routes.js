@@ -45,16 +45,41 @@ async function notifyRestockSubscribers(previous, updated) {
   }
 }
 
+// Cached category tree for hierarchy expansion
+let categoryTreeCache = null;
+let categoryTreeCacheTime = 0;
+const CATEGORY_TREE_TTL = 120_000; // 2 minutes
+
+async function getCategoryTree() {
+  if (categoryTreeCache && Date.now() - categoryTreeCacheTime < CATEGORY_TREE_TTL) {
+    return categoryTreeCache;
+  }
+  const catSnap = await db().collection(COLLECTIONS.CATEGORIES).get();
+  categoryTreeCache = catSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  categoryTreeCacheTime = Date.now();
+  return categoryTreeCache;
+}
+
+// In-memory cache for default home screen products (unfiltered first page)
+let defaultProductsCache = null;
+let defaultProductsCacheTime = 0;
+const DEFAULT_PRODUCTS_TTL = 30_000; // 30 seconds
+
 // GET /api/products — paginated; filter by categoryId, availability, featured, trending
 router.get(
   "/",
   asyncHandler(async (req, res) => {
     const { categoryId, brandId, availability, featured, trending, bestseller, monthlyStockUp, limit = 20, cursor } = req.query;
+    const isDefaultQuery = !categoryId && !brandId && !availability && !featured && !trending && !bestseller && !monthlyStockUp && !cursor && Number(limit) >= 20;
+
+    if (isDefaultQuery && defaultProductsCache && Date.now() - defaultProductsCacheTime < DEFAULT_PRODUCTS_TTL) {
+      return res.json(defaultProductsCache);
+    }
+
     const where = [];
     try {
       if (categoryId) {
-        const catSnap = await db().collection(COLLECTIONS.CATEGORIES).get();
-        const allCats = catSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        const allCats = await getCategoryTree();
         const targetIds = [categoryId];
         // Include every descendant so products assigned to nested admin categories
         // also appear when a customer opens their parent category.
@@ -84,10 +109,17 @@ router.get(
         limit: Math.min(Number(limit), 50),
         startAfter: cursor || null,
       });
+
+      if (isDefaultQuery) {
+        defaultProductsCache = result;
+        defaultProductsCacheTime = Date.now();
+      }
+
       res.json(result);
     } catch (err) {
       if (err.code === 8 || err.message?.includes("Quota exceeded")) {
         console.warn("Firestore quota exceeded in GET /api/products");
+        if (defaultProductsCache) return res.json(defaultProductsCache);
         return res.json({ items: [], total: 0, cursor: null });
       }
       throw err;
@@ -153,6 +185,8 @@ function invalidateProductsCache() {
   cachedProducts = null;
   lastCacheTime = 0;
   inFlightSearchPromise = null;
+  defaultProductsCache = null;
+  defaultProductsCacheTime = 0;
 }
 
 function stem(word) {

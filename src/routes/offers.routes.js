@@ -25,9 +25,10 @@ router.get(
   })
 );
 
-// GET /api/offers/active — public: list currently active offers
+// GET /api/offers/active — public: list currently active offers (annotated with user usage if logged in)
 router.get(
   "/active",
+  optionalAuthenticate,
   asyncHandler(async (req, res) => {
     const now = Date.now();
     const snap = await db()
@@ -35,10 +36,28 @@ router.get(
       .where("isActive", "==", true)
       .where("validTo", ">=", now)
       .get();
+
+    let usedCouponsSet = new Set();
+    if (req.user && req.user.uid) {
+      const { getUserUsedCoupons } = require("../services/couponService");
+      usedCouponsSet = await getUserUsedCoupons(req.user.uid);
+    }
+
     const items = snap.docs
-      .map((d) => ({ id: d.id, ...d.data() }))
+      .map((d) => {
+        const data = d.data();
+        const code = (data.code || "").toUpperCase();
+        const isUsed = usedCouponsSet.has(code);
+        return {
+          id: d.id,
+          ...data,
+          isUsed,
+          alreadyUsed: isUsed,
+        };
+      })
       .filter((o) => o.validFrom <= now);
-    res.json({ items });
+
+    res.json({ items, usedCoupons: Array.from(usedCouponsSet) });
   })
 );
 
@@ -49,10 +68,23 @@ router.post(
   asyncHandler(async (req, res) => {
     const { code, subtotal, items } = req.body;
     if (!code) return res.status(422).json({ error: "coupon code required" });
+    const cleanCode = String(code).trim().toUpperCase();
+
+    // Check if user has already used this coupon
+    if (req.user && req.user.uid) {
+      const { hasUserUsedCoupon } = require("../services/couponService");
+      const alreadyUsed = await hasUserUsedCoupon(req.user.uid, cleanCode);
+      if (alreadyUsed) {
+        return res.status(422).json({
+          error: "You have already used this coupon code. Each coupon can only be used once.",
+          code: "COUPON_ALREADY_USED",
+        });
+      }
+    }
 
     const snap = await db()
       .collection(COLLECTIONS.OFFERS)
-      .where("code", "==", code.toUpperCase())
+      .where("code", "==", cleanCode)
       .limit(1)
       .get();
 
