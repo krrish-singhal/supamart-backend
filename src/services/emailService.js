@@ -37,7 +37,7 @@ function renderEmail(title, description, content, footnote, category = 'SECURITY
 
 async function deliverViaResend(to, subject, html, text) {
   const apiKey = process.env.RESEND_API_KEY?.trim();
-  const from = process.env.RESEND_FROM?.trim() || process.env.SMTP_FROM?.trim() || 'MS Traders <onboarding@resend.dev>';
+  const from = process.env.RESEND_FROM?.trim() || 'MS Traders <onboarding@resend.dev>';
 
   const payload = {
     from,
