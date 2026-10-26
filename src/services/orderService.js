@@ -367,7 +367,11 @@ async function updateStatus(orderId, nextStatus, user) {
     const order = snap.data();
 
     if (user && user.role === "PARTNER" && nextStatus === ORDER_STATUS.DELIVERED) {
-      throw Object.assign(new Error("Partners can only mark orders as PENDING_CONFIRMATION."), { statusCode: 403 });
+      throw Object.assign(new Error("Partners cannot mark orders as completed directly. Waiting for customer confirmation."), { statusCode: 403 });
+    }
+
+    if (user && user.role === "PARTNER" && order.deliveryAcceptanceStatus === "REJECTED") {
+      throw Object.assign(new Error("Cannot update status of a rejected order."), { statusCode: 403 });
     }
 
     if (order.status === ORDER_STATUS.DELIVERED || order.status === ORDER_STATUS.CANCELLED) {
@@ -634,9 +638,9 @@ async function rejectPayment(orderId, reason, customReason) {
 
   notifyUser(
     order.userId,
-    "Order rejected",
-    reasonText,
-    { type: "PAYMENT_REJECTED", orderId }
+    "Payment rejected!",
+    `Your payment for order #${order.orderNo || orderId} was rejected: ${reasonText}. Please tap to retry payment.`,
+    { type: "PAYMENT_REJECTED", orderId, orderNo: order.orderNo }
   ).catch(e => console.error(e));
 
   try {

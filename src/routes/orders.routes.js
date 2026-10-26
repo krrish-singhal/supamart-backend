@@ -65,6 +65,11 @@ router.get(
       limit: Number(req.query.limit) || 20,
       startAfter: req.query.cursor || null,
     });
+    if (req.user.role === ROLES.PARTNER) {
+      result.items = (result.items || []).filter(
+        (o) => o.deliveryAcceptanceStatus !== "REJECTED"
+      );
+    }
     res.json(result);
   })
 );
@@ -467,6 +472,8 @@ router.patch(
       deliveryBoyName: partnerData ? partnerData.name : null,
       deliveryBoyPhone: partnerData ? partnerData.phone : null,
       deliveryAcceptanceStatus: partnerId ? "PENDING" : null,
+      rejectedByPartnerId: null,
+      rejectedByPartnerName: null,
       updatedAt: Date.now(),
     };
     const updated = await Orders.update(req.params.id, updatePayload);
@@ -533,8 +540,20 @@ router.patch(
       return res.status(403).json({ error: "Forbidden: Order not assigned to you" });
     }
     const now = Date.now();
+    const rejectedPartnerId = order.assignedPartnerId;
+    const rejectedPartnerName = order.deliveryBoyName || order.deliveryPartner?.name || "";
     const updatePayload = {
       deliveryAcceptanceStatus: "REJECTED",
+      rejectedByPartnerId: rejectedPartnerId,
+      rejectedByPartnerName: rejectedPartnerName,
+      statusHistory: [
+        ...(order.statusHistory || []),
+        {
+          status: order.status,
+          at: now,
+          note: `Delivery assignment rejected by ${rejectedPartnerName || "partner"}`,
+        },
+      ],
       updatedAt: now,
     };
     const updated = await Orders.update(req.params.id, updatePayload);

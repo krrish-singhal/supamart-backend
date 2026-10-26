@@ -7,6 +7,14 @@ async function sendPush(tokens, title, body, data = {}) {
   await messaging().sendEachForMulticast({
     tokens,
     notification: { title, body },
+    android: {
+      notification: {
+        icon: "notification_icon",
+        color: "#0A7C47",
+        channelId: "order_updates",
+        sound: "default",
+      },
+    },
     data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),
   });
 }

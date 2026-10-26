@@ -57,3 +57,9 @@ services:
         sync: false
       - key: SMTP_FROM
         sync: false
+
+      # Resend HTTP API (Port 443 — bypasses Render Free SMTP port blocks)
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM
+        sync: false

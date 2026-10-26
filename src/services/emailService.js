@@ -1,6 +1,18 @@
 // SMTP credentials and email rendering stay on the server.
+const fs = require('fs');
 const path = require('path');
 const { getSmtpTransport, readSmtpConfig, smtpFailure } = require('./smtpTransport');
+
+let logoBase64 = null;
+try {
+  const logoPath = path.join(__dirname, '../../assets/email-logo.png');
+  if (fs.existsSync(logoPath)) {
+    logoBase64 = fs.readFileSync(logoPath).toString('base64');
+  }
+} catch {
+  logoBase64 = null;
+}
+
 const escape = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function renderEmail(title, description, content, footnote, category = 'SECURITY') {
   const isSecurity = category === 'SECURITY';
@@ -22,7 +34,49 @@ function renderEmail(title, description, content, footnote, category = 'SECURITY
 <p style="font-size:13px;line-height:21px;color:#64748b;border-top:1px solid #e2e8f0;padding-top:18px;margin-top:24px">${escape(subFooter)}</p></td></tr>
 <tr><td style="padding:18px 28px;background:#ecfdf5;color:#047857;font-size:12px;border-radius:0 0 18px 18px">${escape(bottomBadge)}</td></tr></table></td></tr></table></body></html>`;
 }
+
+async function deliverViaResend(to, subject, html, text) {
+  const apiKey = process.env.RESEND_API_KEY?.trim();
+  const from = process.env.RESEND_FROM?.trim() || process.env.SMTP_FROM?.trim() || 'MS Traders <onboarding@resend.dev>';
+
+  const payload = {
+    from,
+    to: Array.isArray(to) ? to : [to],
+    subject,
+    html,
+    text,
+    ...(logoBase64 ? { attachments: [{ filename: 'ms-traders.png', content: logoBase64 }] } : {}),
+  };
+
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    console.error('Resend email delivery failed:', { status: response.status, data });
+    return { delivered: false };
+  }
+  return { delivered: true, id: data.id };
+}
+
 async function deliver(to, subject, html, text) {
+  // 1. If RESEND_API_KEY is configured, send via Resend HTTP API (Port 443 — works on Render Free)
+  if (process.env.RESEND_API_KEY?.trim()) {
+    try {
+      return await deliverViaResend(to, subject, html, text);
+    } catch (error) {
+      console.error('Resend delivery error:', error);
+      return { delivered: false };
+    }
+  }
+
+  // 2. Otherwise fall back to Nodemailer SMTP
   try {
     const t = getSmtpTransport();
     const result = await t.sendMail({ from: process.env.SMTP_FROM?.trim() || { name: 'MS Traders', address: readSmtpConfig().auth.user },

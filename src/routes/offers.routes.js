@@ -57,6 +57,18 @@ router.get(
       })
       .filter((o) => o.validFrom <= now);
 
+    const COUPON_PRIORITY = ['TEA15', 'DETERGENT20', 'BULK100', 'FIRSTORDER', 'MSCLUB10', 'WELCOME50', 'FRESH20', 'FLAT10OFF'];
+    items.sort((a, b) => {
+      const codeA = (a.code || '').toUpperCase();
+      const codeB = (b.code || '').toUpperCase();
+      const idxA = COUPON_PRIORITY.indexOf(codeA);
+      const idxB = COUPON_PRIORITY.indexOf(codeB);
+      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+      if (idxA !== -1) return -1;
+      if (idxB !== -1) return 1;
+      return codeA.localeCompare(codeB);
+    });
+
     res.json({ items, usedCoupons: Array.from(usedCouponsSet) });
   })
 );

@@ -211,4 +211,150 @@ test("Order Immutability & Transparency Unit Tests", async (t) => {
       DeliveryPartners.findById = origPartnerFind;
     }
   });
+
+  await t.test("PATCH /api/orders/:id/reject-assignment: partner rejection and GET /api/orders filtering", async () => {
+    const origOrderFind = Orders.findById;
+    const origOrderUpdate = Orders.update;
+    const origOrderPaginate = Orders.paginate;
+
+    let updatedPayload = null;
+    Orders.findById = async (id) => ({
+      id,
+      orderNo: 1045,
+      status: ORDER_STATUS.ACCEPTED,
+      assignedPartnerId: "partner-1",
+      deliveryBoyName: "Ramesh Rider",
+      deliveryAcceptanceStatus: "PENDING",
+    });
+    Orders.update = async (id, update) => {
+      updatedPayload = update;
+      return { id, ...update };
+    };
+
+    try {
+      const partnerToken = createToken("partner-1", ROLES.PARTNER);
+      const res = await fetch(`${baseUrl}/api/orders/order-placed-2/reject-assignment`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${partnerToken}`,
+        },
+      });
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(updatedPayload.deliveryAcceptanceStatus, "REJECTED");
+      assert.strictEqual(updatedPayload.rejectedByPartnerId, "partner-1");
+      assert.strictEqual(updatedPayload.rejectedByPartnerName, "Ramesh Rider");
+
+      // Now verify GET /api/orders excludes this order for the partner
+      Orders.paginate = async () => ({
+        items: [
+          { id: "o1", orderNo: 1045, deliveryAcceptanceStatus: "REJECTED", assignedPartnerId: "partner-1" },
+          { id: "o2", orderNo: 1046, deliveryAcceptanceStatus: "ACCEPTED", assignedPartnerId: "partner-1" },
+        ],
+        total: 2,
+      });
+
+      const getRes = await fetch(`${baseUrl}/api/orders`, {
+        headers: { Authorization: `Bearer ${partnerToken}` },
+      });
+      assert.strictEqual(getRes.status, 200);
+      const data = await getRes.json();
+      assert.strictEqual(data.items.length, 1);
+      assert.strictEqual(data.items[0].id, "o2");
+      assert.strictEqual(data.items[0].deliveryAcceptanceStatus, "ACCEPTED");
+    } finally {
+      Orders.findById = origOrderFind;
+      Orders.update = origOrderUpdate;
+      Orders.paginate = origOrderPaginate;
+    }
+  });
+
+  await t.test("PATCH /api/orders/:id/status: delivery partner cannot directly mark DELIVERED", async () => {
+    const { db } = require("../src/config/firebase");
+    const orderRef = db().collection("orders").doc("test-partner-delivered-lock");
+    await orderRef.set({
+      orderNo: 1048,
+      status: ORDER_STATUS.OUT_FOR_DELIVERY,
+      assignedPartnerId: "partner-1",
+      userId: "user-1",
+      paymentMethod: "ONLINE",
+      paymentStatus: "PAID",
+      statusHistory: [],
+      createdAt: Date.now(),
+    });
+
+    try {
+      const partnerToken = createToken("partner-1", ROLES.PARTNER);
+      const res = await fetch(`${baseUrl}/api/orders/test-partner-delivered-lock/status`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${partnerToken}`,
+        },
+        body: JSON.stringify({ status: ORDER_STATUS.DELIVERED }),
+      });
+
+      // Status update directly to DELIVERED by PARTNER must be rejected
+      assert.strictEqual(res.status, 403);
+      const body = await res.json();
+      assert.ok(body.error.includes("Partners cannot mark orders as completed directly"));
+    } finally {
+      await orderRef.delete().catch(() => {});
+    }
+  });
+
+  await t.test("PATCH /api/orders/:id/assign: admin reassignment resets acceptance status and clears rejection info", async () => {
+    const origOrderFind = Orders.findById;
+    const origOrderUpdate = Orders.update;
+    const { DeliveryPartners } = require("../src/models");
+    const origPartnerFind = DeliveryPartners.findById;
+
+    let updatedPayload = null;
+    Orders.findById = async (id) => ({
+      id,
+      orderNo: 1047,
+      status: ORDER_STATUS.ACCEPTED,
+      assignedPartnerId: "partner-1",
+      deliveryBoyName: "Ramesh Rider",
+      deliveryAcceptanceStatus: "REJECTED",
+      rejectedByPartnerId: "partner-1",
+      rejectedByPartnerName: "Ramesh Rider",
+    });
+    Orders.update = async (id, update) => {
+      updatedPayload = update;
+      return { id, ...update };
+    };
+    DeliveryPartners.findById = async (id) => ({
+      id,
+      name: "Suresh Patil",
+      phone: "9812345678",
+      isOnDuty: true,
+      isActive: true,
+    });
+
+    try {
+      const adminToken = createToken("admin-1", ROLES.ADMIN);
+      const res = await fetch(`${baseUrl}/api/orders/order-placed-3/assign`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({ partnerId: "partner-2" }),
+      });
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(updatedPayload.assignedPartnerId, "partner-2");
+      assert.strictEqual(updatedPayload.deliveryAcceptanceStatus, "PENDING");
+      assert.strictEqual(updatedPayload.rejectedByPartnerId, null);
+      assert.strictEqual(updatedPayload.rejectedByPartnerName, null);
+      assert.strictEqual(updatedPayload.deliveryBoyName, "Suresh Patil");
+    } finally {
+      Orders.findById = origOrderFind;
+      Orders.update = origOrderUpdate;
+      DeliveryPartners.findById = origPartnerFind;
+    }
+  });
 });
+
