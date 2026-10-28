@@ -370,4 +370,95 @@ router.patch(
   })
 );
 
+// POST /api/issues/:id/reply - Admin replies to customer regarding an issue
+router.post(
+  "/:id/reply",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const { reply } = req.body;
+    const cleanReply = (reply || "").trim();
+    if (!cleanReply) {
+      return res.status(400).json({ error: "Reply text is required" });
+    }
+
+    const now = Date.now();
+    let issueRef = db().collection(COLLECTIONS.ISSUES).doc(req.params.id);
+    let doc = await issueRef.get();
+    let userId = null;
+    let orderId = "";
+    let orderNo = "";
+
+    if (req.params.id.startsWith("dispute_")) {
+      orderId = req.params.id.replace("dispute_", "");
+      const orderRef = db().collection(COLLECTIONS.ORDERS).doc(orderId);
+      const orderSnap = await orderRef.get();
+      if (orderSnap.exists) {
+        const oData = orderSnap.data();
+        userId = oData.userId;
+        orderNo = oData.orderNo || orderId.slice(-4);
+        const existingReplies = oData.adminReplies || [];
+        await orderRef.update({
+          adminReplies: [...existingReplies, { text: cleanReply, sentBy: "ADMIN", createdAt: now }],
+          lastAdminReply: cleanReply,
+          lastAdminReplyAt: now,
+          updatedAt: now,
+        });
+      }
+    } else if (doc.exists) {
+      const iData = doc.data();
+      userId = iData.userId;
+      orderId = iData.orderId || "";
+      orderNo = iData.orderNo || "";
+      const existingReplies = iData.replies || [];
+      await issueRef.update({
+        replies: [...existingReplies, { text: cleanReply, sentBy: "ADMIN", createdAt: now }],
+        lastReply: cleanReply,
+        lastReplyAt: now,
+        updatedAt: now,
+      });
+    } else {
+      const refundRef = db().collection(COLLECTIONS.REFUNDS).doc(req.params.id);
+      const refundDoc = await refundRef.get();
+      if (refundDoc.exists) {
+        const rData = refundDoc.data();
+        userId = rData.userId;
+        orderId = rData.orderId || "";
+        orderNo = rData.orderNo || "";
+        const existingReplies = rData.replies || [];
+        await refundRef.update({
+          replies: [...existingReplies, { text: cleanReply, sentBy: "ADMIN", createdAt: now }],
+          lastReply: cleanReply,
+          lastReplyAt: now,
+          updatedAt: now,
+        });
+      } else {
+        return res.status(404).json({ error: "Issue not found" });
+      }
+    }
+
+    if (userId) {
+      await notifyUser(
+        userId,
+        "Reply from MS Traders",
+        cleanReply,
+        {
+          type: "ISSUE_REPLY",
+          issueId: req.params.id,
+          orderId,
+          orderNo: String(orderNo),
+        }
+      );
+    }
+
+    res.json({
+      success: true,
+      issueId: req.params.id,
+      reply: cleanReply,
+      createdAt: now,
+    });
+  })
+);
+
 module.exports = router;
+

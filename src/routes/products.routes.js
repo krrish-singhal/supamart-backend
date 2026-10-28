@@ -45,25 +45,22 @@ async function notifyRestockSubscribers(previous, updated) {
   }
 }
 
-// Cached category tree for hierarchy expansion
-let categoryTreeCache = null;
-let categoryTreeCacheTime = 0;
-const CATEGORY_TREE_TTL = 120_000; // 2 minutes
+// Use unified in-memory catalog cache for hierarchy expansion (0 Firestore reads on cache hits)
+const {
+  getCatalog,
+  getCachedProducts,
+  getCachedCategories,
+  invalidateCatalogCache,
+} = require("../services/catalogCache");
 
 async function getCategoryTree() {
-  if (categoryTreeCache && Date.now() - categoryTreeCacheTime < CATEGORY_TREE_TTL) {
-    return categoryTreeCache;
-  }
-  const catSnap = await db().collection(COLLECTIONS.CATEGORIES).get();
-  categoryTreeCache = catSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  categoryTreeCacheTime = Date.now();
-  return categoryTreeCache;
+  return getCachedCategories();
 }
 
 // In-memory cache for default home screen products (unfiltered first page)
 let defaultProductsCache = null;
 let defaultProductsCacheTime = 0;
-const DEFAULT_PRODUCTS_TTL = 30_000; // 30 seconds
+const DEFAULT_PRODUCTS_TTL = 300_000; // 5 minutes
 
 // GET /api/products — paginated; filter by categoryId, availability, featured, trending
 router.get(
@@ -106,7 +103,7 @@ router.get(
       const result = await Products.paginate({
         where,
         orderBy: { field: "createdAt", dir: "desc" },
-        limit: Math.min(Number(limit), 50),
+        limit: Math.min(Number(limit), 100),
         startAfter: cursor || null,
       });
 
@@ -127,64 +124,12 @@ router.get(
   })
 );
 
-// In-memory products cache for fast, case-insensitive, multi-field search
-let cachedProducts = null;
-let lastCacheTime = 0;
-let inFlightSearchPromise = null;
-const CACHE_TTL_MS = 60 * 1000;
-
 async function getSearchableProducts() {
-  const now = Date.now();
-  if (cachedProducts && now - lastCacheTime < CACHE_TTL_MS) {
-    return cachedProducts;
-  }
-  if (inFlightSearchPromise) {
-    return inFlightSearchPromise;
-  }
-
-  inFlightSearchPromise = (async () => {
-    try {
-      const [prodSnap, catSnap, brandSnap] = await Promise.all([
-        db().collection(COLLECTIONS.PRODUCTS).get(),
-        db().collection(COLLECTIONS.CATEGORIES).get(),
-        db().collection(COLLECTIONS.BRANDS).get(),
-      ]);
-
-      const catMap = new Map();
-      catSnap.docs.forEach((d) => catMap.set(d.id, { id: d.id, ...d.data() }));
-
-      const brandMap = new Map();
-      brandSnap.docs.forEach((d) => brandMap.set(d.id, { id: d.id, ...d.data() }));
-
-      cachedProducts = prodSnap.docs.map((d) => {
-        const data = d.data();
-        const cat = data.categoryId ? catMap.get(data.categoryId) : null;
-        const parentCat = cat?.parentId ? catMap.get(cat.parentId) : null;
-        const brand = data.brandId ? brandMap.get(data.brandId) : null;
-
-        return {
-          id: d.id,
-          ...data,
-          categoryName: cat?.name || data.categoryName || data.category || "",
-          parentCategoryName: parentCat?.name || "",
-          brandName: brand?.name || data.brandName || data.brand || "",
-        };
-      });
-
-      lastCacheTime = Date.now();
-      return cachedProducts;
-    } finally {
-      inFlightSearchPromise = null;
-    }
-  })();
-
-  return inFlightSearchPromise;
+  return getCachedProducts();
 }
 
 function invalidateProductsCache() {
-  cachedProducts = null;
-  lastCacheTime = 0;
-  inFlightSearchPromise = null;
+  invalidateCatalogCache();
   defaultProductsCache = null;
   defaultProductsCacheTime = 0;
 }
@@ -439,6 +384,46 @@ router.put(
     const updated = await Products.update(req.params.id, update);
     await notifyRestockSubscribers(previous, updated);
     invalidateProductsCache();
+    try {
+      const { invalidateLowStockCache } = require("./admin.routes");
+      invalidateLowStockCache();
+    } catch (_) {}
+
+    if (variants && Array.isArray(variants)) {
+      const thresh = Number(updated.lowStockThreshold) || 10;
+      const lowVariants = variants.filter((v) => Number(v.stock) <= thresh);
+      if (lowVariants.length > 0) {
+        try {
+          const { notifyAdminsLowStock } = require("../services/notificationService");
+          const lowStockItems = lowVariants.map((v) => ({
+            productId: updated.id,
+            name: updated.name,
+            variantId: v.id,
+            variantLabel: v.label || v.size,
+            stock: Number(v.stock),
+            threshold: thresh,
+            isOutOfStock: Number(v.stock) <= 0,
+          }));
+          notifyAdminsLowStock(lowStockItems).catch(() => {});
+          const now = Date.now();
+          for (const item of lowStockItems) {
+            db().collection(COLLECTIONS.ADMIN_ALERTS || "adminAlerts").add({
+              type: item.isOutOfStock ? "OUT_OF_STOCK" : "LOW_STOCK",
+              productId: item.productId,
+              productName: item.name,
+              variantId: item.variantId,
+              variantLabel: item.variantLabel,
+              currentStock: Math.max(0, item.stock),
+              threshold: item.threshold,
+              isOutOfStock: item.isOutOfStock,
+              createdAt: now,
+              read: false,
+            }).catch(() => {});
+          }
+        } catch (_) {}
+      }
+    }
+
     res.json(updated);
   })
 );
@@ -461,10 +446,12 @@ router.patch(
   authenticate,
   requireRole(ROLES.ADMIN),
   asyncHandler(async (req, res) => {
-    const { availability, isAvailableToday } = req.body;
+    const { availability, isAvailableToday, onSale, isOnSale } = req.body;
     const update = { updatedAt: Date.now() };
     if (availability) update.availability = availability;
     if (typeof isAvailableToday === "boolean") update.isAvailableToday = isAvailableToday;
+    if (typeof onSale === "boolean") update.onSale = onSale;
+    if (typeof isOnSale === "boolean") update.isOnSale = isOnSale;
     const previous = await Products.findById(req.params.id);
     const updated = await Products.update(req.params.id, update);
     await notifyRestockSubscribers(previous, updated);
@@ -473,4 +460,6 @@ router.patch(
   })
 );
 
+router.invalidateProductsCache = invalidateProductsCache;
 module.exports = router;
+module.exports.invalidateProductsCache = invalidateProductsCache;

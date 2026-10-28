@@ -43,21 +43,23 @@ function priceCart(cartItems, products) {
 }
 
 function computeDiscount(offer, subtotal, items, products) {
-  if (!offer || !offer.isActive) return 0;
+  if (!offer || offer.isActive === false) return 0;
   const now = Date.now();
-  if (now < offer.validFrom || now > offer.validTo) return 0;
-  if (subtotal < offer.minValue) return 0;
+  if ((offer.validFrom && now < offer.validFrom) || (offer.validTo && now > offer.validTo)) return 0;
+  if (offer.minValue && subtotal < offer.minValue) return 0;
 
   // determine eligible base depending on scope
   let base = subtotal;
   if (offer.scope === OFFER_SCOPE.CATEGORY || offer.scope === OFFER_SCOPE.PRODUCT) {
-    base = items.reduce((sum, it) => {
-      const product = products.get(it.productId);
+    base = (items || []).reduce((sum, it) => {
+      const product = products?.get ? products.get(it.productId) : null;
       const match =
         offer.scope === OFFER_SCOPE.PRODUCT
           ? it.productId === offer.scopeId
           : product && product.categoryId === offer.scopeId;
-      return match ? sum + it.price * it.qty : sum;
+      const unitPrice = Number(it.price ?? it.unitPrice ?? product?.variants?.find(v => v.id === it.variantId)?.price ?? 0);
+      const qty = Number(it.qty) || 1;
+      return match ? sum + unitPrice * qty : sum;
     }, 0);
   }
 
@@ -68,7 +70,9 @@ function computeDiscount(offer, subtotal, items, products) {
   }
 
   discount = offer.kind === OFFER_KIND.PERCENT ? (base * offer.value) / 100 : offer.value;
-  if (offer.maxDiscount != null) discount = Math.min(discount, offer.maxDiscount);
+  if (offer.maxDiscount != null && Number(offer.maxDiscount) > 0) {
+    discount = Math.min(discount, Number(offer.maxDiscount));
+  }
   return Number(Math.min(discount, subtotal).toFixed(2));
 }
 

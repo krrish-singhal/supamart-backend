@@ -356,5 +356,12 @@ test("Order Immutability & Transparency Unit Tests", async (t) => {
       DeliveryPartners.findById = origPartnerFind;
     }
   });
+
+  await t.test("rejectPayment: accepts INVALID_UTR rejection reason", () => {
+    const { PAYMENT_REJECTION_REASON } = require("../src/config/constants");
+    assert.strictEqual(PAYMENT_REJECTION_REASON.INVALID_UTR, "INVALID_UTR");
+    assert.ok(Object.values(PAYMENT_REJECTION_REASON).includes("INVALID_UTR"));
+  });
 });
+
 

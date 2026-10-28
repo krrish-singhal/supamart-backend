@@ -5,7 +5,7 @@ const { asyncHandler } = require("../middleware/error");
 const { authenticate, requireRole } = require("../middleware/auth");
 const { db, authAdmin } = require("../config/firebase");
 const { ROLES, COLLECTIONS } = require("../config/constants");
-const { broadcast } = require("../services/notificationService");
+const { broadcast, notifyLowStockToCartHolders } = require("../services/notificationService");
 const dayjs = require("dayjs");
 
 // storageService.js configures Cloudinary globally; import it to ensure config is applied
@@ -142,21 +142,90 @@ router.get(
   })
 );
 
-// GET /api/admin/low-stock — products below stock threshold per variant
+// In-memory catalog cache for zero-read low-stock evaluation
+const { getCachedProducts, invalidateCatalogCache } = require("../services/catalogCache");
+
+function invalidateLowStockCache() {
+  invalidateCatalogCache();
+}
+
+// GET /api/admin/low-stock — products below stock threshold per variant (serves from memory, 0 reads)
 router.get(
   "/low-stock",
   authenticate,
   requireRole(ROLES.ADMIN),
   asyncHandler(async (req, res) => {
-    const threshold = Number(req.query.threshold) || 10;
-    const snap = await db().collection(COLLECTIONS.PRODUCTS).get();
+    const defaultThreshold = Number(req.query.threshold) || 10;
+    const products = await getCachedProducts();
     const low = [];
-    snap.docs.forEach((d) => {
-      const p = { id: d.id, ...d.data() };
-      const lowVariants = (p.variants || []).filter((v) => v.stock <= threshold);
-      if (lowVariants.length) low.push({ ...p, lowVariants });
+    products.forEach((p) => {
+      const thresh = Number(p.lowStockThreshold) || defaultThreshold;
+      const lowVariants = (p.variants || []).filter((v) => Number(v.stock) <= thresh);
+      if (lowVariants.length) {
+        const totalStock = (p.variants || []).reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+        low.push({ ...p, lowVariants, totalStock, isOutOfStock: totalStock <= 0 });
+      }
     });
     res.json({ items: low });
+  })
+);
+
+// GET /api/admin/catalog — full catalog (products, categories, brands) served from in-memory cache (0 Firestore reads)
+router.get(
+  "/catalog",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const { getCatalog } = require("../services/catalogCache");
+    const catalog = await getCatalog();
+    res.json(catalog);
+  })
+);
+
+// GET /api/admin/alerts — recent operational alerts (low stock, stockouts)
+router.get(
+  "/alerts",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+    const snap = await db()
+      .collection(COLLECTIONS.ADMIN_ALERTS || "adminAlerts")
+      .orderBy("createdAt", "desc")
+      .limit(limit)
+      .get();
+    const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    res.json({ items });
+  })
+);
+
+// PATCH /api/admin/alerts/:id/read — mark an alert as read
+router.patch(
+  "/alerts/:id/read",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const ref = db().collection(COLLECTIONS.ADMIN_ALERTS || "adminAlerts").doc(req.params.id);
+    await ref.update({ read: true, readAt: Date.now() });
+    res.json({ ok: true, id: req.params.id });
+  })
+);
+
+// POST /api/admin/alerts/clear-all — mark all unread alerts as read
+router.post(
+  "/alerts/clear-all",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const snap = await db()
+      .collection(COLLECTIONS.ADMIN_ALERTS || "adminAlerts")
+      .where("read", "==", false)
+      .limit(50)
+      .get();
+    const batch = db().batch();
+    snap.docs.forEach((d) => batch.update(d.ref, { read: true, readAt: Date.now() }));
+    await batch.commit();
+    res.json({ ok: true, cleared: snap.size });
   })
 );
 
@@ -206,10 +275,46 @@ router.post(
     };
     const docRef = await db().collection("broadcasts").add(record);
 
+    // Also persist into reachable users' notification subcollection for in-app drawer
+    const writePromises = usersSnap.docs.map(async (d) => {
+      try {
+        const u = d.data();
+        if (u.offerNotificationsEnabled === false) return;
+        await d.ref.collection("notifications").add({
+          title,
+          body,
+          data: { type: "BROADCAST", targetScreen: targetScreen || "Home screen" },
+          read: false,
+          createdAt: Date.now(),
+        });
+      } catch (_) {}
+    });
+    Promise.allSettled(writePromises).catch(() => {});
+
     if (tokens.length) {
       await broadcast(tokens, title, body);
     }
     res.json({ id: docRef.id, sent: tokens.length, ...record });
+  })
+);
+
+// POST /api/admin/notify-low-stock — sends low-stock alerts to customers who have low-stock items in their cart
+router.post(
+  "/notify-low-stock",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const productsSnap = await db().collection(COLLECTIONS.PRODUCTS).get();
+    let notifiedCount = 0;
+    for (const doc of productsSnap.docs) {
+      const p = doc.data();
+      const lowVariant = (p.variants || []).find((v) => Number(v.stock) > 0 && Number(v.stock) <= 5);
+      if (lowVariant) {
+        await notifyLowStockToCartHolders(doc.id, lowVariant.stock, p.name);
+        notifiedCount++;
+      }
+    }
+    res.json({ ok: true, productsChecked: productsSnap.size, lowStockProductsFound: notifiedCount });
   })
 );
 
@@ -464,4 +569,6 @@ router.get(
   })
 );
 
+router.invalidateLowStockCache = invalidateLowStockCache;
 module.exports = router;
+module.exports.invalidateLowStockCache = invalidateLowStockCache;

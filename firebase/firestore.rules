@@ -7,13 +7,13 @@ service cloud.firestore {
     function isAdmin()     { return isSignedIn() && request.auth.token.role == 'ADMIN'; }
     function isPartner()   { return isSignedIn() && request.auth.token.role == 'PARTNER'; }
 
-    // ── Public catalog: read-only to clients; ALL writes via Admin SDK (bypasses rules). ──
-    match /categories/{id} { allow read: if true;  allow write: if false; }
-    match /products/{id}   { allow read: if true;  allow write: if false; }
-    match /banners/{id}    { allow read: if true;  allow write: if false; }
-    match /offers/{id}     { allow read: if true;  allow write: if false; }
-    match /config/{id}     { allow read: if true;  allow write: if false; }
-    match /brands/{id}     { allow read: if true;  allow write: if false; }
+    // ── Public catalog: read-only to public; writes permitted for verified ADMIN. ──
+    match /categories/{id} { allow read: if true;  allow write: if isAdmin(); }
+    match /products/{id}   { allow read: if true;  allow write: if isAdmin(); }
+    match /banners/{id}    { allow read: if true;  allow write: if isAdmin(); }
+    match /offers/{id}     { allow read: if true;  allow write: if isAdmin(); }
+    match /config/{id}     { allow read: if true;  allow write: if isAdmin(); }
+    match /brands/{id}     { allow read: if true;  allow write: if isAdmin(); }
 
     // ── Users: owner read own doc + subcollections; admin all. ──
     // Direct client writes are disallowed — all mutations go through the backend Admin SDK.
@@ -87,6 +87,12 @@ service cloud.firestore {
     // ── Broadcasts: admin read; backend writes. ──
     match /broadcasts/{id} {
       allow read: if isSignedIn() && isAdmin();
+      allow write: if false;
+    }
+
+    // ── Admin Alerts: real-time operational alerts (low stock, stockouts) ──
+    match /adminAlerts/{id} {
+      allow read: if isSignedIn();
       allow write: if false;
     }
 

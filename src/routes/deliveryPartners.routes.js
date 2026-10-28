@@ -155,22 +155,38 @@ router.patch(
 
     // Sync to active order(s) so customer & admin get live coordinates in real-time
     try {
+      const { invalidateReadsCache } = require("./reads.routes");
+      invalidateReadsCache(req.params.uid);
+
       const activeOrdersSnap = await db()
         .collection(COLLECTIONS.ORDERS)
         .where("assignedPartnerId", "==", req.params.uid)
-        .where("status", "in", [ORDER_STATUS.OUT_FOR_DELIVERY, ORDER_STATUS.ACCEPTED, ORDER_STATUS.PLACED])
         .get();
 
       if (!activeOrdersSnap.empty) {
+        const activeStatuses = new Set([
+          ORDER_STATUS.OUT_FOR_DELIVERY,
+          ORDER_STATUS.ACCEPTED,
+          ORDER_STATUS.PLACED,
+          ORDER_STATUS.PENDING_CONFIRMATION,
+        ]);
         const batch = db().batch();
+        let updatedCount = 0;
         activeOrdersSnap.docs.forEach((d) => {
-          batch.update(d.ref, {
-            partnerLocation: { lat, lng, updatedAt: now },
-            lastSyncedAt: now,
-            updatedAt: now,
-          });
+          const oData = d.data();
+          if (activeStatuses.has(oData.status)) {
+            batch.update(d.ref, {
+              partnerLocation: { lat, lng, updatedAt: now },
+              lastSyncedAt: now,
+              updatedAt: now,
+            });
+            updatedCount++;
+            invalidateReadsCache(d.id);
+          }
         });
-        await batch.commit();
+        if (updatedCount > 0) {
+          await batch.commit();
+        }
       }
     } catch (syncErr) {
       console.warn("Failed to sync partner location to active order:", syncErr.message);

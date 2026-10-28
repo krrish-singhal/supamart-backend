@@ -117,6 +117,9 @@ const offerSchema = Joi.object({
   title: Joi.string().allow("", null),
   description: Joi.string().allow("", null),
   image: Joi.string().uri().allow("", null),
+  tag: Joi.string().allow("", null),
+  tagColor: Joi.string().allow("", null),
+  sortOrder: Joi.number().integer().allow(null),
   kind: Joi.string().valid(...Object.values(OFFER_KIND)).required(),
   value: Joi.number().min(0).required(), // percent or flat amount
   scope: Joi.string().valid(...Object.values(OFFER_SCOPE)).required(),

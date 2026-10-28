@@ -239,22 +239,48 @@ router.patch('/:id/ratings', authenticate, asyncHandler(async (req, res) => {
   res.json(result);
 }));
 
+// Helper to robustly find order by doc ID, numeric orderNo, or string orderNo
+async function findOrderByIdOrOrderNo(idOrNo) {
+  if (!idOrNo || idOrNo === "undefined" || idOrNo === "null") return null;
+  const cleanId = String(idOrNo).trim();
+  try {
+    const order = await Orders.findById(cleanId);
+    if (order) return order;
+  } catch (_) {}
+
+  try {
+    const num = Number(cleanId);
+    if (!isNaN(num) && num > 0) {
+      const snap = await db().collection(COLLECTIONS.ORDERS).where("orderNo", "==", num).limit(1).get();
+      if (!snap.empty) {
+        return { id: snap.docs[0].id, ...snap.docs[0].data() };
+      }
+    }
+    const strSnap = await db().collection(COLLECTIONS.ORDERS).where("orderNo", "==", cleanId).limit(1).get();
+    if (!strSnap.empty) {
+      return { id: strSnap.docs[0].id, ...strSnap.docs[0].data() };
+    }
+  } catch (_) {}
+
+  return null;
+}
+
 // PATCH /api/orders/:id/instructions  (customer updates delivery instructions)
 router.patch(
   "/:id/instructions",
   authenticate,
   asyncHandler(async (req, res) => {
-    const order = await Orders.findById(req.params.id);
+    const order = await findOrderByIdOrOrderNo(req.params.id);
     if (!order) return res.status(404).json({ error: "Order not found" });
     if (order.userId !== req.user.uid && req.user.role !== ROLES.ADMIN) {
       return res.status(403).json({ error: "Forbidden" });
     }
     const { deliveryInstructions } = req.body;
-    const updated = await Orders.update(req.params.id, {
+    const updated = await Orders.update(order.id, {
       deliveryInstructions,
       updatedAt: Date.now(),
     });
-    invalidateReadsCache(req.params.id);
+    invalidateReadsCache(order.id);
     res.json(updated);
   })
 );
@@ -264,7 +290,7 @@ router.get(
   "/:id",
   authenticate,
   asyncHandler(async (req, res) => {
-    const order = await Orders.findById(req.params.id);
+    const order = await findOrderByIdOrOrderNo(req.params.id);
     if (!order) return res.status(404).json({ error: "Order not found" });
     const isAdmin = req.user.role === ROLES.ADMIN;
     const isOwner = order.userId === req.user.uid;
@@ -273,8 +299,8 @@ router.get(
     if (!isAdmin && !isOwner && !isAssignedPartner) {
       return res.status(403).json({ error: "Forbidden" });
     }
-    // If a delivery partner is assigned, ensure partner name and contact info are attached for customer tracking
-    if (order.assignedPartnerId && (!order.deliveryBoyName || !order.deliveryBoyPhone || !order.deliveryPartner)) {
+    // If a delivery partner is assigned, ensure partner name, contact info, and live coordinates are attached for customer tracking
+    if (order.assignedPartnerId) {
       try {
         const p = await DeliveryPartners.findById(order.assignedPartnerId);
         if (p) {
@@ -285,6 +311,14 @@ router.get(
             name: p.name || "",
             phone: p.phone || p.mobile || "",
           };
+          const pLoc = p.currentLocation || p.location || p.lastLocation;
+          if (pLoc && Number.isFinite(Number(pLoc.lat)) && Number.isFinite(Number(pLoc.lng))) {
+            order.partnerLocation = {
+              lat: Number(pLoc.lat),
+              lng: Number(pLoc.lng),
+              updatedAt: pLoc.updatedAt || p.lastSyncedAt || Date.now(),
+            };
+          }
         }
       } catch (_) {}
     }
@@ -366,7 +400,7 @@ router.patch(
   "/:id/cancel",
   authenticate,
   asyncHandler(async (req, res) => {
-    const order = await Orders.get(req.params.id);
+    const order = await findOrderByIdOrOrderNo(req.params.id);
     if (!order) return res.status(404).json({ error: "Order not found" });
     if (order.userId !== req.user.uid && req.user.role !== ROLES.ADMIN) {
       return res.status(403).json({ error: "Forbidden" });
@@ -375,13 +409,13 @@ router.patch(
     if (nonCancellable.includes(order.status)) {
       return res.status(422).json({ error: "Order cannot be cancelled at this stage", code: "CANNOT_CANCEL" });
     }
-    const result = await updateStatus(req.params.id, ORDER_STATUS.CANCELLED);
+    const result = await updateStatus(order.id, ORDER_STATUS.CANCELLED);
 
     // Create refund record if one doesn't exist already
     try {
       const existingRef = await db()
         .collection(COLLECTIONS.REFUNDS)
-        .where("orderId", "==", req.params.id)
+        .where("orderId", "==", order.id)
         .limit(1)
         .get();
 
@@ -437,7 +471,7 @@ router.patch(
   authenticate,
   requireRole(ROLES.ADMIN),
   asyncHandler(async (req, res) => {
-    const order = await Orders.findById(req.params.id);
+    const order = await findOrderByIdOrOrderNo(req.params.id);
     if (!order) return res.status(404).json({ error: "Order not found" });
     if (order.status === ORDER_STATUS.DELIVERED || order.status === ORDER_STATUS.CANCELLED) {
       return res.status(422).json({
@@ -476,15 +510,26 @@ router.patch(
       rejectedByPartnerName: null,
       updatedAt: Date.now(),
     };
-    const updated = await Orders.update(req.params.id, updatePayload);
-    invalidateReadsCache(req.params.id);
+    const updated = await Orders.update(order.id, updatePayload);
+    invalidateReadsCache(order.id);
+    if (order.userId) invalidateReadsCache(order.userId);
+    invalidateReadsCache("orders");
 
     if (partnerId) {
       notifyUser(
         partnerId,
         "New Delivery Assigned",
-        `Order #${order.orderNo || req.params.id.slice(-4)} has been assigned to you. Open app to accept or reject.`,
-        { type: "ORDER_ASSIGNED", orderId: req.params.id }
+        `Order #${order.orderNo || order.id.slice(-4)} has been assigned to you. Open app to accept or reject.`,
+        { type: "ORDER_ASSIGNED", orderId: order.id }
+      ).catch((e) => console.error(e));
+    }
+
+    if (order.userId && partnerData) {
+      notifyUser(
+        order.userId,
+        "Delivery Partner Assigned",
+        `${partnerData.name} has been assigned to deliver your order #${order.orderNo || order.id.slice(-4)}.`,
+        { type: "PARTNER_ASSIGNED", orderId: order.id }
       ).catch((e) => console.error(e));
     }
 
@@ -498,7 +543,7 @@ router.patch(
   authenticate,
   requireRole(ROLES.PARTNER, ROLES.ADMIN),
   asyncHandler(async (req, res) => {
-    const order = await Orders.findById(req.params.id);
+    const order = await findOrderByIdOrOrderNo(req.params.id);
     if (!order) return res.status(404).json({ error: "Order not found" });
     if (req.user.role === ROLES.PARTNER && order.assignedPartnerId !== req.user.uid) {
       return res.status(403).json({ error: "Forbidden: Order not assigned to you" });
@@ -513,15 +558,15 @@ router.patch(
       ],
       updatedAt: now,
     };
-    const updated = await Orders.update(req.params.id, updatePayload);
-    invalidateReadsCache(req.params.id);
+    const updated = await Orders.update(order.id, updatePayload);
+    invalidateReadsCache(order.id);
 
     // Notify customer that delivery boy is on the way
     notifyUser(
       order.userId,
       "Order on the way!",
       `Your order #${order.orderNo} has been accepted by ${order.deliveryBoyName || "your delivery partner"} and is on its way.`,
-      { type: "ORDER_STATUS", status: ORDER_STATUS.OUT_FOR_DELIVERY, orderId: req.params.id }
+      { type: "ORDER_STATUS", status: ORDER_STATUS.OUT_FOR_DELIVERY, orderId: order.id }
     ).catch((e) => console.error(e));
 
     res.json(updated);
@@ -534,7 +579,7 @@ router.patch(
   authenticate,
   requireRole(ROLES.PARTNER, ROLES.ADMIN),
   asyncHandler(async (req, res) => {
-    const order = await Orders.findById(req.params.id);
+    const order = await findOrderByIdOrOrderNo(req.params.id);
     if (!order) return res.status(404).json({ error: "Order not found" });
     if (req.user.role === ROLES.PARTNER && order.assignedPartnerId !== req.user.uid) {
       return res.status(403).json({ error: "Forbidden: Order not assigned to you" });
@@ -556,8 +601,8 @@ router.patch(
       ],
       updatedAt: now,
     };
-    const updated = await Orders.update(req.params.id, updatePayload);
-    invalidateReadsCache(req.params.id);
+    const updated = await Orders.update(order.id, updatePayload);
+    invalidateReadsCache(order.id);
     res.json(updated);
   })
 );
@@ -575,7 +620,7 @@ router.patch(
       });
     }
 
-    const order = await Orders.findById(req.params.id);
+    const order = await findOrderByIdOrOrderNo(req.params.id);
     if (!order) return res.status(404).json({ error: "Order not found" });
     if (req.user.role === ROLES.PARTNER && order.assignedPartnerId !== req.user.uid) {
       return res.status(403).json({ error: "Forbidden: Order not assigned to you" });
@@ -596,7 +641,7 @@ router.patch(
     }
 
     const updatedBy = req.user.role === ROLES.ADMIN ? "Store Admin" : "Delivery Partner";
-    const displayOrderNo = order.orderNo || order.displayId || (req.params.id ? req.params.id.slice(-4) : "---");
+    const displayOrderNo = order.orderNo || order.displayId || (order.id ? order.id.slice(-4) : "---");
 
     const updatePayload = {
       delayReason: cleanReason,
@@ -611,8 +656,8 @@ router.patch(
       updatedAt: now,
     };
 
-    const updated = await Orders.update(req.params.id, updatePayload);
-    invalidateReadsCache(req.params.id);
+    const updated = await Orders.update(order.id, updatePayload);
+    invalidateReadsCache(order.id);
 
     // 1. Auto-shoot email to customer (mandatory default task)
     const { sendDeliveryDelayEmail } = require("../services/emailService");

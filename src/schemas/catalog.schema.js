@@ -72,10 +72,21 @@ const productSchema = Joi.object({
 // banners/{bannerId}
 const bannerSchema = Joi.object({
   image: Joi.string().uri().required(),
-  target: Joi.string().allow("", null), // categoryId / productId / url
-  order: Joi.number().integer().min(0).required(),
+  target: Joi.string().allow("", null).default("Home"), // categoryId / productId / url / screen
+  title: Joi.string().allow("", null).optional(),
+  subtitle: Joi.string().allow("", null).optional(),
+  label: Joi.string().allow("", null).optional(),
+  targetType: Joi.string().allow("", null).optional(),
+  targetId: Joi.string().allow("", null).optional(),
+  destination: Joi.string().allow("", null).optional(),
+  background: Joi.string().allow("", null).optional(),
+  text: Joi.string().allow("", null).optional(),
+  secondary: Joi.string().allow("", null).optional(),
+  button: Joi.string().allow("", null).optional(),
+  buttonText: Joi.string().allow("", null).optional(),
+  order: Joi.number().integer().min(0).default(0),
   isActive: Joi.boolean().default(true),
-  createdAt: Joi.number().required(),
-});
+  createdAt: Joi.number().optional(),
+}).unknown(true);
 
 module.exports = { variantSchema, categorySchema, brandSchema, productSchema, bannerSchema };

@@ -12,7 +12,8 @@ const denied = () => Object.assign(new Error('Forbidden'), { statusCode: 403 });
 const invalid = () => Object.assign(new Error('Invalid read request'), { statusCode: 422 });
 
 const readsCache = new Map();
-const READS_CACHE_TTL_MS = 30_000;
+const PUBLIC_READS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes (invalidated on mutation)
+const PRIVATE_READS_CACHE_TTL_MS = 90 * 1000; // 90 seconds (absorbs mobile poll loops)
 
 router.post('/', optionalAuthenticate, asyncHandler(async (req, res) => {
   const { path, kind, constraints = [], cursor } = req.body;
@@ -45,9 +46,9 @@ router.post('/', optionalAuthenticate, asyncHandler(async (req, res) => {
   };
   res.set('Cache-Control', 'no-store');
 
-  const isOrderDoc = root === 'orders' && kind === 'doc';
-  const ttl = isOrderDoc ? 0 : (isPublic ? READS_CACHE_TTL_MS : 15_000);
-  const cacheKey = !isOrderDoc ? (isPublic
+  const isLiveTrackingDoc = (root === 'orders' || root === 'deliveryPartners') && kind === 'doc';
+  const ttl = isLiveTrackingDoc ? 0 : (isPublic ? PUBLIC_READS_CACHE_TTL_MS : PRIVATE_READS_CACHE_TTL_MS);
+  const cacheKey = !isLiveTrackingDoc ? (isPublic
     ? JSON.stringify({ scope: 'public', path, kind, constraints, cursor })
     : (uid ? JSON.stringify({ scope: 'private', uid, path, kind, constraints, cursor }) : null)) : null;
 
@@ -65,7 +66,7 @@ router.post('/', optionalAuthenticate, asyncHandler(async (req, res) => {
     if (readsCache.size > 1000) {
       const now = Date.now();
       for (const [k, v] of readsCache.entries()) {
-        if (now - v.time > READS_CACHE_TTL_MS) readsCache.delete(k);
+        if (now - v.time > PUBLIC_READS_CACHE_TTL_MS) readsCache.delete(k);
       }
     }
     readsCache.set(key, { time: Date.now(), data });
@@ -118,7 +119,7 @@ router.post('/', optionalAuthenticate, asyncHandler(async (req, res) => {
       if (!previous.exists || (ownerField && previous.data()[ownerField] !== uid)) throw denied();
       query = query.startAfter(previous);
     }
-    const pageSize = requestedLimit || 500;
+    const pageSize = requestedLimit || 50; // Bound default collection reads to 50 instead of 500
     const snap = await query.limit(pageSize).get();
     const responseData = {
       documents: snap.docs.map(d => ({ id: d.id, data: clean(d.data()) })),

@@ -13,7 +13,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 // In-memory cache for brands (invalidated on any write)
 let cache = null;
 let cacheAt = 0;
-const CACHE_TTL_MS = 60_000;
+const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
 function invalidateCache() {
   cache = null;

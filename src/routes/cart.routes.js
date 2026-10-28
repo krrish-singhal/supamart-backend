@@ -70,12 +70,30 @@ router.get(
           .limit(1)
           .get();
         const offer = snap.empty ? null : { id: snap.docs[0].id, ...snap.docs[0].data() };
-        discount = computeDiscount(offer, subtotal, pricedItems, productMap);
-        if (offer) {
-          couponDetails = {
-            kind: offer.kind,
-            value: offer.value
-          };
+        const now = Date.now();
+        const isOfferActive = offer && offer.isActive !== false &&
+          (!offer.validFrom || now >= offer.validFrom) &&
+          (!offer.validTo || now <= offer.validTo);
+
+        if (!isOfferActive || (offer && offer.minValue && subtotal < offer.minValue)) {
+          await db().collection(COLLECTIONS.CARTS).doc(req.user.uid).set(
+            { couponCode: null, updatedAt: Date.now() },
+            { merge: true }
+          );
+          cart.couponCode = null;
+          couponDetails = null;
+          discount = 0;
+        } else {
+          discount = computeDiscount(offer, subtotal, pricedItems, productMap);
+          if (offer) {
+            couponDetails = {
+              code: offer.code,
+              kind: offer.kind,
+              value: offer.value,
+              minValue: offer.minValue || 0,
+              maxDiscount: offer.maxDiscount || null,
+            };
+          }
         }
       }
     }
@@ -134,11 +152,34 @@ router.put(
       }
     }
 
+    let finalCouponCode = couponCode;
+    if (finalCouponCode && items.length > 0) {
+      try {
+        const productIds = [...new Set(items.map((i) => i.productId))];
+        const productDocs = await Promise.all(productIds.map((id) => Products.findById(id)));
+        const productMap = new Map(productDocs.filter(Boolean).map((p) => [p.id, p]));
+        const { subtotal } = priceCart(items, productMap);
+        const snap = await db()
+          .collection(COLLECTIONS.OFFERS)
+          .where("code", "==", finalCouponCode)
+          .limit(1)
+          .get();
+        if (!snap.empty) {
+          const offer = snap.docs[0].data();
+          if (offer.minValue && subtotal < offer.minValue) {
+            finalCouponCode = null;
+          }
+        }
+      } catch (_) {}
+    } else if (items.length === 0) {
+      finalCouponCode = null;
+    }
+
     await db().collection(COLLECTIONS.CARTS).doc(req.user.uid).set(
-      { items, couponCode: couponCode || null, updatedAt: now },
+      { items, couponCode: finalCouponCode || null, updatedAt: now },
       { merge: false }
     );
-    res.json({ ok: true, itemCount: items.length });
+    res.json({ ok: true, itemCount: items.length, couponCode: finalCouponCode });
   })
 );
 
@@ -166,8 +207,15 @@ router.patch(
         .where("code", "==", cleanCode)
         .limit(1)
         .get();
-      if (snap.empty || !snap.docs[0].data().isActive) {
+      if (snap.empty || snap.docs[0].data().isActive === false) {
         return res.status(422).json({ error: "Invalid or expired coupon" });
+      }
+      const offerData = snap.docs[0].data();
+      if (offerData.validFrom && now < offerData.validFrom) {
+        return res.status(422).json({ error: "Coupon is not yet active" });
+      }
+      if (offerData.validTo && now > offerData.validTo) {
+        return res.status(422).json({ error: "Coupon has expired" });
       }
     }
 

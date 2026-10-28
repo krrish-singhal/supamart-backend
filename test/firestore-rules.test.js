@@ -140,9 +140,13 @@ test("Firestore Security Rules Suite", async (t) => {
     await assertSucceeds(unauthDb.collection("products").doc("prod-1").get());
     await assertSucceeds(unauthDb.collection("categories").doc("cat-1").get());
 
-    // Client write denied
+    // Client write denied for unauth and regular customer
     await assertFails(unauthDb.collection("products").doc("prod-new").set({ name: "Hacked" }));
     await assertFails(custDb.collection("products").doc("prod-1").update({ price: 0 }));
+
+    // Admin write allowed for catalog management
+    const adminDb = testEnv.authenticatedContext("admin-1", { role: "ADMIN" }).firestore();
+    await assertSucceeds(adminDb.collection("products").doc("prod-1").update({ availability: "UNAVAILABLE" }));
   });
 
   await t.test("Orders: unauthenticated read is denied", async () => {

@@ -10,14 +10,17 @@ const {
   PAYMENT_METHOD,
   PAYMENT_REJECTION_REASON,
   AVAILABILITY,
+  LOW_STOCK_THRESHOLD,
 } = require("../config/constants");
 const { evaluateDelivery } = require("./geoService");
 const { priceCart, computeDiscount, applyTax } = require("./pricingService");
-const { notifyUser } = require("./notificationService");
+const { notifyUser, notifyLowStockToCartHolders, notifyAdminsLowStock } = require("./notificationService");
+const { invalidateLowStockCache } = require("../routes/admin.routes");
 
 const REJECTION_REASON_LABELS = {
   [PAYMENT_REJECTION_REASON.NOT_RECEIVED]: "Amount was not received in our account.",
   [PAYMENT_REJECTION_REASON.INCORRECT_AMOUNT]: "The amount credited was incorrect.",
+  [PAYMENT_REJECTION_REASON.INVALID_UTR]: "Invalid or unverified UTR reference number.",
 };
 
 async function getConfig(tx) {
@@ -93,7 +96,7 @@ async function placeOrder({ userId, cartItems, couponCode, address, notes, payme
     }
   }
 
-  return db().runTransaction(async (tx) => {
+  const result = await db().runTransaction(async (tx) => {
     // Idempotency: if a key was supplied, check if we already wrote this order
     if (idempotencyKey) {
       const idemSnap = await tx.get(
@@ -207,18 +210,32 @@ async function placeOrder({ userId, cartItems, couponCode, address, notes, payme
       }
     }
 
-    const taxed = subtotal - discount;
-    const tax = applyTax(taxed, config.taxPercent);
-    const total = Number((taxed + tax + geo.deliveryCharge).toFixed(2));
+    const tax = applyTax(subtotal, config.taxPercent);
+    const total = Number(Math.max(0, subtotal + tax + geo.deliveryCharge - discount).toFixed(2));
 
     // sequential order number
     const orderNo = (config.orderSeq || 1000) + 1;
 
     // decrement stock + availability
+    const lowStockItems = [];
     for (const ci of cartItems) {
       const product = products.get(ci.productId);
       const variant = product.variants.find((v) => v.id === ci.variantId);
+      const previousStock = variant.stock;
       variant.stock -= ci.qty;
+      const threshold = Number(product.lowStockThreshold) || LOW_STOCK_THRESHOLD || 10;
+      if (variant.stock <= threshold) {
+        lowStockItems.push({
+          productId: product.id,
+          name: product.name,
+          variantId: variant.id,
+          variantLabel: variant.label,
+          previousStock,
+          stock: variant.stock,
+          threshold,
+          isOutOfStock: variant.stock <= 0,
+        });
+      }
       const totalStock = product.variants.reduce((s, v) => s + v.stock, 0);
       const availability = totalStock <= 0 ? AVAILABILITY.OUT_OF_STOCK : product.availability;
       tx.update(db().collection(COLLECTIONS.PRODUCTS).doc(product.id), {
@@ -261,6 +278,26 @@ async function placeOrder({ userId, cartItems, couponCode, address, notes, payme
       updatedAt: now,
     };
     tx.set(orderRef, order);
+
+    // record real-time operational alerts for admin
+    for (const item of lowStockItems) {
+      const alertRef = db().collection(COLLECTIONS.ADMIN_ALERTS || "adminAlerts").doc();
+      tx.set(alertRef, {
+        type: item.isOutOfStock ? "OUT_OF_STOCK" : "LOW_STOCK",
+        productId: item.productId,
+        productName: item.name,
+        variantId: item.variantId,
+        variantLabel: item.variantLabel,
+        previousStock: item.previousStock,
+        currentStock: Math.max(0, item.stock),
+        threshold: item.threshold,
+        isOutOfStock: item.isOutOfStock,
+        orderId: orderRef.id,
+        orderNo,
+        createdAt: now,
+        read: false,
+      });
+    }
 
     // mark coupon as used atomically
     if (cleanCouponCode) {
@@ -308,8 +345,27 @@ async function placeOrder({ userId, cartItems, couponCode, address, notes, payme
       });
     }
 
-    return { id: orderRef.id, ...order };
+    return { order: { id: orderRef.id, ...order }, lowStockItems };
   });
+
+  // Always invalidate low stock cache when order is created so admin portal sees accurate stock counts
+  try {
+    invalidateLowStockCache();
+  } catch (_) {}
+
+  if (result?.lowStockItems && result.lowStockItems.length > 0) {
+    for (const item of result.lowStockItems) {
+      if (item.stock > 0 && item.stock <= 5) {
+        notifyLowStockToCartHolders(item.productId, item.stock, item.name).catch(() => {});
+      }
+    }
+    // Push real-time low-stock and out-of-stock notification to admin devices
+    notifyAdminsLowStock(result.lowStockItems, result.order?.orderNo).catch((err) => {
+      console.error("notifyAdminsLowStock failed", err);
+    });
+  }
+
+  return result?.order || result;
 }
 
 // Validates forward-only status transitions — but not required to be the immediate next
@@ -397,12 +453,43 @@ async function updateStatus(orderId, nextStatus, user) {
       );
     }
 
+    let productSnaps = [];
+    if (nextStatus === ORDER_STATUS.CANCELLED && Array.isArray(order.items) && order.items.length > 0) {
+      const productRefs = [...new Set(order.items.map((i) => i.productId))].filter(Boolean).map((id) =>
+        db().collection(COLLECTIONS.PRODUCTS).doc(id)
+      );
+      productSnaps = await Promise.all(productRefs.map((r) => tx.get(r)));
+    }
+
     const now = Date.now();
     tx.update(ref, {
       status: nextStatus,
       statusHistory: [...order.statusHistory, { status: nextStatus, at: now }],
       updatedAt: now,
     });
+
+    if (nextStatus === ORDER_STATUS.CANCELLED && productSnaps.length > 0) {
+      const products = new Map();
+      productSnaps.forEach((s) => {
+        if (s.exists) products.set(s.id, { id: s.id, ...s.data() });
+      });
+      for (const item of order.items || []) {
+        const product = products.get(item.productId);
+        if (!product) continue;
+        const variant = (product.variants || []).find((v) => v.id === item.variantId);
+        if (!variant) continue;
+        variant.stock = (variant.stock || 0) + (item.qty || 1);
+        const totalStock = product.variants.reduce((s, v) => s + (v.stock || 0), 0);
+        const availability = totalStock > 0 ? AVAILABILITY.AVAILABLE : product.availability;
+        const soldCount = Math.max(0, (product.soldCount || 0) - (item.qty || 1));
+        tx.update(db().collection(COLLECTIONS.PRODUCTS).doc(product.id), {
+          variants: product.variants,
+          availability,
+          soldCount,
+          updatedAt: Date.now(),
+        });
+      }
+    }
 
     // metric adjustments on terminal states
     const inc = require("firebase-admin").firestore.FieldValue.increment;
@@ -429,6 +516,8 @@ async function updateStatus(orderId, nextStatus, user) {
   try {
     const { invalidateReadsCache } = require("../routes/reads.routes");
     invalidateReadsCache(orderId);
+    if (order.userId) invalidateReadsCache(order.userId);
+    invalidateLowStockCache();
   } catch (_) {}
 
   return { id: orderId, status: nextStatus };
@@ -573,10 +662,18 @@ async function rejectPayment(orderId, reason, customReason) {
     if (!snap.exists) throw Object.assign(new Error("Order not found"), { statusCode: 404 });
     const current = snap.data();
     if (current.status === ORDER_STATUS.DELIVERED) {
-      throw Object.assign(
-        new Error(`Order #${current.orderNo || orderId} is closed (${current.status}) — payment cannot be rejected.`),
-        { statusCode: 422, code: "ORDER_CLOSED" }
-      );
+      // If order was already marked delivered, mark payment claim as failed without restocking inventory
+      const now = Date.now();
+      tx.update(ref, {
+        paymentStatus: PAYMENT_STATUS.FAILED,
+        paymentRejectionReason: reasonText,
+        statusHistory: [
+          ...(current.statusHistory || []),
+          { status: ORDER_STATUS.DELIVERED, at: now, note: `Payment rejected: ${reasonText}` },
+        ],
+        updatedAt: now,
+      });
+      return { ...current, id: orderId, paymentStatus: PAYMENT_STATUS.FAILED, paymentRejectionReason: reasonText };
     }
     if (current.paymentStatus === PAYMENT_STATUS.PAID) {
       throw Object.assign(new Error("This payment was already confirmed as PAID — it cannot be rejected."), { statusCode: 422 });
@@ -647,6 +744,7 @@ async function rejectPayment(orderId, reason, customReason) {
     const { invalidateReadsCache } = require("../routes/reads.routes");
     invalidateReadsCache(orderId);
     if (order?.userId) invalidateReadsCache(order.userId);
+    invalidateLowStockCache();
   } catch (e) {
     console.error("Cache invalidation error:", e);
   }

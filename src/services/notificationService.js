@@ -35,6 +35,11 @@ async function notifyUser(userId, title, body, data = {}) {
     const userRef = db().collection(COLLECTIONS.USERS).doc(userId);
     await userRef.collection("notifications").add({ title, body, data, read: false, createdAt: now });
 
+    try {
+      const { invalidateReadsCache } = require("../routes/reads.routes");
+      invalidateReadsCache(userId);
+    } catch (_) {}
+
     const userSnap = await userRef.get();
     const fcmTokens = userSnap.exists ? userSnap.data().fcmTokens : null;
     if (fcmTokens && fcmTokens.length > 0) {
@@ -83,9 +88,78 @@ async function sendOwnerWhatsApp(order) {
   const lines = order.items.map((i) => `${i.name} ${i.variantLabel} x${i.qty}`).join("\n");
   const message =
     `Order #${order.orderNo}\n${lines}\nTotal: ₹${order.total}\n` +
-    `Customer: ${order.addressSnapshot.houseNo}, ${order.addressSnapshot.street}`;
-  // await axios.post(provider, { to: process.env.OWNER_PHONE, message });
+    `Customer: ${order.addressSnapshot?.houseNo || ""}, ${order.addressSnapshot?.street || ""}`;
   return { queued: true, message };
 }
 
-module.exports = { sendPush, broadcast, sendOwnerWhatsApp, notifyUser, notifyAdminsNewOrder };
+// Notify customers who have a low stock product in their cart
+async function notifyLowStockToCartHolders(productId, remainingStock, productName) {
+  try {
+    if (remainingStock <= 0 || remainingStock > 5) return;
+    const title = `Hurry! ${productName || "An item in your cart"} is running low`;
+    const body = `Only ${remainingStock} left in stock. Place your order now before it sells out!`;
+    const data = { type: "LOW_STOCK", productId: String(productId) };
+
+    const cartsSnap = await db().collection(COLLECTIONS.CARTS).get();
+    const targetedUsers = [];
+    for (const doc of cartsSnap.docs) {
+      const cart = doc.data();
+      const hasProduct = (cart.items || []).some((it) => String(it.productId) === String(productId));
+      if (hasProduct && doc.id) {
+        targetedUsers.push(doc.id);
+      }
+    }
+
+    for (const uid of targetedUsers) {
+      await notifyUser(uid, title, body, data);
+    }
+  } catch (err) {
+    console.error("notifyLowStockToCartHolders error:", err);
+  }
+}
+
+// Pushes a "Low Stock" / "Out of Stock" alert to all registered admin devices.
+// Fires when customer orders or manual inventory adjustments drop a product's stock
+// to or below its threshold. Best-effort and never throws.
+async function notifyAdminsLowStock(items, orderNo) {
+  try {
+    if (!items || !items.length) return;
+    const snap = await db().collection(COLLECTIONS.CONFIG).doc("adminDevices").get();
+    const tokens = snap.exists ? snap.data().fcmTokens || [] : [];
+    if (!tokens.length) return;
+
+    for (const item of items) {
+      const isOutOfStock = Boolean(item.isOutOfStock || Number(item.stock) <= 0);
+      const title = isOutOfStock
+        ? `🚨 Out of Stock: ${item.name}`
+        : `⚠️ Low Stock Alert: ${item.name}`;
+      const body = isOutOfStock
+        ? `${item.name}${item.variantLabel ? ` (${item.variantLabel})` : ""} reached 0 units${orderNo ? ` on order #${orderNo}` : ""}!`
+        : `Only ${item.stock} left for ${item.name}${item.variantLabel ? ` (${item.variantLabel})` : ""}! Refill inventory.`;
+
+      await sendPush(
+        tokens,
+        title,
+        body,
+        {
+          type: isOutOfStock ? "OUT_OF_STOCK" : "LOW_STOCK",
+          productId: String(item.productId || ""),
+          stock: String(item.stock ?? 0),
+          orderNo: String(orderNo || ""),
+        }
+      );
+    }
+  } catch (err) {
+    console.error("notifyAdminsLowStock: failed to push", err);
+  }
+}
+
+module.exports = {
+  sendPush,
+  broadcast,
+  sendOwnerWhatsApp,
+  notifyUser,
+  notifyAdminsNewOrder,
+  notifyAdminsLowStock,
+  notifyLowStockToCartHolders,
+};

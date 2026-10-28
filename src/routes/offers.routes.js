@@ -34,7 +34,6 @@ router.get(
     const snap = await db()
       .collection(COLLECTIONS.OFFERS)
       .where("isActive", "==", true)
-      .where("validTo", ">=", now)
       .get();
 
     let usedCouponsSet = new Set();
@@ -51,22 +50,28 @@ router.get(
         return {
           id: d.id,
           ...data,
+          code,
           isUsed,
           alreadyUsed: isUsed,
         };
       })
-      .filter((o) => o.validFrom <= now);
+      .filter((o) => {
+        if (o.isActive === false) return false;
+        if (o.validFrom && now < o.validFrom) return false;
+        if (o.validTo && now > o.validTo) return false;
+        return true;
+      });
 
-    const COUPON_PRIORITY = ['TEA15', 'DETERGENT20', 'BULK100', 'FIRSTORDER', 'MSCLUB10', 'WELCOME50', 'FRESH20', 'FLAT10OFF'];
+    // Priority order matching reference design, then sortOrder, then newest
+    const priority = ["WELCOME50", "MSCLUB10", "FRESH20", "BULK100"];
     items.sort((a, b) => {
-      const codeA = (a.code || '').toUpperCase();
-      const codeB = (b.code || '').toUpperCase();
-      const idxA = COUPON_PRIORITY.indexOf(codeA);
-      const idxB = COUPON_PRIORITY.indexOf(codeB);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
-      return codeA.localeCompare(codeB);
+      const orderA = a.sortOrder != null ? a.sortOrder : (priority.indexOf(a.code) !== -1 ? priority.indexOf(a.code) + 1 : 999);
+      const orderB = b.sortOrder != null ? b.sortOrder : (priority.indexOf(b.code) !== -1 ? priority.indexOf(b.code) + 1 : 999);
+      if (orderA !== orderB) return orderA - orderB;
+      const createdA = Number(a.createdAt || 0);
+      const createdB = Number(b.createdAt || 0);
+      if (createdA !== createdB) return createdB - createdA;
+      return (Number(b.value) || 0) - (Number(a.value) || 0);
     });
 
     res.json({ items, usedCoupons: Array.from(usedCouponsSet) });
@@ -100,19 +105,19 @@ router.post(
       .limit(1)
       .get();
 
-    if (snap.empty || !snap.docs[0].data().isActive) {
+    if (snap.empty || snap.docs[0].data().isActive === false) {
       return res.status(422).json({ error: "Invalid or expired coupon" });
     }
 
     const offer = { id: snap.docs[0].id, ...snap.docs[0].data() };
     const now = Date.now();
-    if (now < offer.validFrom) {
+    if (offer.validFrom && now < offer.validFrom) {
       return res.status(422).json({ error: "Coupon is not yet active" });
     }
-    if (now > offer.validTo) {
+    if (offer.validTo && now > offer.validTo) {
       return res.status(422).json({ error: "Coupon has expired" });
     }
-    if (subtotal < offer.minValue) {
+    if (offer.minValue && subtotal < offer.minValue) {
       return res.status(422).json({
         error: `Minimum order value for this coupon is ₹${offer.minValue}`,
       });
@@ -122,7 +127,7 @@ router.post(
     
     let productMap = new Map();
     if (items && items.length > 0) {
-      const productRefs = [...new Set(items.map(i => i.productId))].map(id => db().collection(COLLECTIONS.PRODUCTS).doc(id));
+      const productRefs = [...new Set(items.map(i => i.productId).filter(Boolean))].map(id => db().collection(COLLECTIONS.PRODUCTS).doc(id));
       const productSnaps = await Promise.all(productRefs.map(r => r.get()));
       productSnaps.forEach(s => {
         if (s.exists) productMap.set(s.id, { id: s.id, ...s.data() });
@@ -135,12 +140,19 @@ router.post(
     }
 
     res.json({
+      id: offer.id,
       code: offer.code,
+      title: offer.title || '',
+      description: offer.description || '',
+      tag: offer.tag || null,
+      tagColor: offer.tagColor || null,
+      sortOrder: offer.sortOrder || null,
       kind: offer.kind,
       value: offer.value,
       scope: offer.scope,
+      scopeId: offer.scopeId || null,
       maxDiscount: offer.maxDiscount,
-      minValue: offer.minValue,
+      minValue: offer.minValue || 0,
       evaluatedDiscount: discount
     });
   })
@@ -170,6 +182,16 @@ router.post(
     
     if (offerData.minValue) offerData.minValue = Number(offerData.minValue);
     else offerData.minValue = 0;
+
+    if (offerData.sortOrder !== undefined) {
+      offerData.sortOrder = offerData.sortOrder != null && offerData.sortOrder !== '' ? Number(offerData.sortOrder) : null;
+    }
+    if (offerData.tag !== undefined) {
+      offerData.tag = offerData.tag ? String(offerData.tag).trim().toUpperCase() : null;
+    }
+    if (offerData.tagColor !== undefined) {
+      offerData.tagColor = offerData.tagColor ? String(offerData.tagColor).trim() : null;
+    }
 
     if (offerData.validFrom) offerData.validFrom = Number(offerData.validFrom);
     if (offerData.validTo) offerData.validTo = Number(offerData.validTo);
@@ -211,6 +233,15 @@ router.put(
     if (updateData.minValue !== undefined) {
       if (updateData.minValue) updateData.minValue = Number(updateData.minValue);
       else updateData.minValue = 0;
+    }
+    if (updateData.sortOrder !== undefined) {
+      updateData.sortOrder = updateData.sortOrder != null && updateData.sortOrder !== '' ? Number(updateData.sortOrder) : null;
+    }
+    if (updateData.tag !== undefined) {
+      updateData.tag = updateData.tag ? String(updateData.tag).trim().toUpperCase() : null;
+    }
+    if (updateData.tagColor !== undefined) {
+      updateData.tagColor = updateData.tagColor ? String(updateData.tagColor).trim() : null;
     }
     if (updateData.validFrom) updateData.validFrom = Number(updateData.validFrom);
     if (updateData.validTo) updateData.validTo = Number(updateData.validTo);
