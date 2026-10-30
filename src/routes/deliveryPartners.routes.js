@@ -4,6 +4,7 @@ const { authenticate, requireRole } = require("../middleware/auth");
 const { DeliveryPartners, Orders } = require("../models");
 const { ROLES, COLLECTIONS, ORDER_STATUS } = require("../config/constants");
 const { db } = require("../config/firebase");
+const { haversineKm, validCoordinates } = require("../config/deliveryArea");
 
 const router = express.Router();
 
@@ -122,6 +123,10 @@ router.patch(
       updatedAt: now,
     };
     const updated = await DeliveryPartners.update(req.params.uid, update);
+    try {
+      const { invalidateReadsCache } = require("./reads.routes");
+      invalidateReadsCache(req.params.uid);
+    } catch (_) {}
     res.json(updated);
   })
 );
@@ -134,7 +139,7 @@ router.patch(
     if (req.user.uid !== req.params.uid) {
       return res.status(403).json({ error: "Forbidden" });
     }
-    const { lat, lng } = req.body;
+    const { lat, lng, speed } = req.body;
     if (typeof lat !== "number" || typeof lng !== "number") {
       return res.status(400).json({ error: "lat and lng must be numbers" });
     }
@@ -143,6 +148,7 @@ router.patch(
       currentLocation: {
         lat,
         lng,
+        speed: Number.isFinite(Number(speed)) ? Number(speed) : 0,
         updatedAt: now,
       },
       lastSyncedAt: now,
@@ -176,7 +182,21 @@ router.patch(
           const oData = d.data();
           if (activeStatuses.has(oData.status)) {
             batch.update(d.ref, {
-              partnerLocation: { lat, lng, updatedAt: now },
+              partnerLocation: { lat, lng, speed: Number.isFinite(Number(speed)) ? Number(speed) : 0, updatedAt: now },
+              ...(oData.status === ORDER_STATUS.OUT_FOR_DELIVERY && validCoordinates(Number((oData.addressSnapshot || oData.address)?.lat ?? (oData.addressSnapshot || oData.address)?.latitude), Number((oData.addressSnapshot || oData.address)?.lng ?? (oData.addressSnapshot || oData.address)?.longitude))
+                ? (() => {
+                    const address = oData.addressSnapshot || oData.address;
+                    const remainingKm = haversineKm(lat, lng, Number(address.lat ?? address.latitude), Number(address.lng ?? address.longitude)) * 1.3;
+                    // GPS speed is the live traffic signal. Ignore stationary/noisy readings;
+                    // the route estimate remains bounded for implausible coordinates/speeds.
+                    const speedKmph = Number(speed) > 0.3 && Number(speed) < 12
+                      ? Math.max(4, Math.min(40, Number(speed) * 3.6))
+                      : 20;
+                    const minutes = Math.max(2, Math.min(180, Math.ceil(remainingKm / speedKmph * 60)));
+                    const delayMinutes = Math.max(0, Number(oData.deliveryDelayMinutes ?? oData.deliveryDelay?.totalDelayMinutes) || 0);
+                    return { estimatedDeliveryAt: now + (minutes + delayMinutes) * 60000 };
+                  })()
+                : {}),
               lastSyncedAt: now,
               updatedAt: now,
             });

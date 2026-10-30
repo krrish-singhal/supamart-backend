@@ -12,7 +12,7 @@ const denied = () => Object.assign(new Error('Forbidden'), { statusCode: 403 });
 const invalid = () => Object.assign(new Error('Invalid read request'), { statusCode: 422 });
 
 const readsCache = new Map();
-const PUBLIC_READS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes (invalidated on mutation)
+const PUBLIC_READS_CACHE_TTL_MS = 15 * 1000; // 15 seconds (absorbs rapid poll bursts, ensures near-instant real-time freshness)
 const PRIVATE_READS_CACHE_TTL_MS = 90 * 1000; // 90 seconds (absorbs mobile poll loops)
 
 router.post('/', optionalAuthenticate, asyncHandler(async (req, res) => {
@@ -47,10 +47,16 @@ router.post('/', optionalAuthenticate, asyncHandler(async (req, res) => {
   res.set('Cache-Control', 'no-store');
 
   const isLiveTrackingDoc = (root === 'orders' || root === 'deliveryPartners') && kind === 'doc';
-  const ttl = isLiveTrackingDoc ? 0 : (isPublic ? PUBLIC_READS_CACHE_TTL_MS : PRIVATE_READS_CACHE_TTL_MS);
-  const cacheKey = !isLiveTrackingDoc ? (isPublic
+  const LIVE_TRACKING_CACHE_TTL_MS = 10 * 1000; // 10 seconds
+  const isTimeSensitiveCustomerData = root === 'refunds' || (root === 'users' && child === 'notifications');
+  const ttl = isLiveTrackingDoc
+    ? LIVE_TRACKING_CACHE_TTL_MS
+    : isTimeSensitiveCustomerData
+      ? 2_000
+      : (isPublic ? PUBLIC_READS_CACHE_TTL_MS : PRIVATE_READS_CACHE_TTL_MS);
+  const cacheKey = isPublic
     ? JSON.stringify({ scope: 'public', path, kind, constraints, cursor })
-    : (uid ? JSON.stringify({ scope: 'private', uid, path, kind, constraints, cursor }) : null)) : null;
+    : (uid ? JSON.stringify({ scope: 'private', uid, path, kind, constraints, cursor }) : null);
 
   if (cacheKey && readsCache.has(cacheKey)) {
     const entry = readsCache.get(cacheKey);
@@ -121,8 +127,15 @@ router.post('/', optionalAuthenticate, asyncHandler(async (req, res) => {
     }
     const pageSize = requestedLimit || 50; // Bound default collection reads to 50 instead of 500
     const snap = await query.limit(pageSize).get();
+    let docs = snap.docs.map(d => ({ id: d.id, data: clean(d.data()) }));
+    if (path === 'products') {
+      const hasAvailabilityFilter = constraints.some(c => c && (c.field === 'availability'));
+      if (!hasAvailabilityFilter) {
+        docs = docs.filter(d => d.data && d.data.availability !== 'UNAVAILABLE');
+      }
+    }
     const responseData = {
-      documents: snap.docs.map(d => ({ id: d.id, data: clean(d.data()) })),
+      documents: docs,
       nextCursor: !requestedLimit && snap.size === pageSize ? snap.docs.at(-1).id : null,
     };
     if (cacheKey) setCachedResponse(cacheKey, responseData);
@@ -137,18 +150,31 @@ router.post('/', optionalAuthenticate, asyncHandler(async (req, res) => {
   }
 }));
 
+const invalidationHooks = new Set();
+function onInvalidateReadsCache(fn) {
+  if (typeof fn === 'function') invalidationHooks.add(fn);
+}
+
 function invalidateReadsCache(pathSubstring) {
   if (!pathSubstring) {
     readsCache.clear();
-    return;
-  }
-  for (const key of readsCache.keys()) {
-    if (key.includes(pathSubstring)) {
-      readsCache.delete(key);
+  } else {
+    for (const key of readsCache.keys()) {
+      if (
+        key.includes(pathSubstring) ||
+        (pathSubstring === 'products' && (key.includes('"products"') || key.includes('products')))
+      ) {
+        readsCache.delete(key);
+      }
     }
+  }
+  for (const fn of invalidationHooks) {
+    try { fn(pathSubstring); } catch (_) {}
   }
 }
 
 router.invalidateReadsCache = invalidateReadsCache;
+router.onInvalidateReadsCache = onInvalidateReadsCache;
 module.exports = router;
 module.exports.invalidateReadsCache = invalidateReadsCache;
+module.exports.onInvalidateReadsCache = onInvalidateReadsCache;

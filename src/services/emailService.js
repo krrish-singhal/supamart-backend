@@ -40,7 +40,10 @@ function renderEmail(title, description, content, footnote, category = 'SECURITY
 
 async function deliverViaResend(to, subject, html, text) {
   const apiKey = process.env.RESEND_API_KEY?.trim();
-  const from = process.env.RESEND_FROM?.trim() || 'MS Traders <onboarding@resend.dev>';
+  const from = process.env.RESEND_FROM?.trim();
+  if (!from) {
+    return { delivered: false, error: 'RESEND_FROM must be set to a verified sender address.' };
+  }
 
   const payload = {
     from,
@@ -58,35 +61,49 @@ async function deliverViaResend(to, subject, html, text) {
     } : {}),
   };
 
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  let response;
+  try {
+    response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     console.error('Resend email delivery failed:', { status: response.status, data });
-    return { delivered: false };
+    const providerMessage = typeof data.message === 'string' ? data.message : typeof data.error === 'string' ? data.error : null;
+    return { delivered: false, error: providerMessage || `Resend rejected the email (${response.status}).` };
   }
   return { delivered: true, id: data.id };
 }
 
 async function deliver(to, subject, html, text) {
-  // 1. If RESEND_API_KEY is configured, send via Resend HTTP API (Port 443 — works on Render Free)
-  if (process.env.RESEND_API_KEY?.trim()) {
+  let resendError = null;
+  // Prefer Resend when configured, then try SMTP if the API rejects or is
+  // temporarily unavailable. This keeps delay alerts deliverable through either
+  // configured transport without blocking the tracking update request.
+  if (process.env.RESEND_API_KEY?.trim() && process.env.RESEND_FROM?.trim()) {
     try {
-      return await deliverViaResend(to, subject, html, text);
+      const result = await deliverViaResend(to, subject, html, text);
+      if (result.delivered) return result;
+      resendError = result.error;
     } catch (error) {
-      console.error('Resend delivery error:', error);
-      return { delivered: false };
+      console.error('Resend delivery error:', error?.message || error);
+      resendError = 'Resend could not deliver the email. Check the sender configuration and Resend logs.';
     }
   }
 
-  // 2. Otherwise fall back to Nodemailer SMTP
+  // Fall back to Nodemailer SMTP, including when configured Resend is unhealthy.
   try {
     const t = getSmtpTransport();
     const result = await t.sendMail({ from: process.env.SMTP_FROM?.trim() || { name: 'MS Traders', address: readSmtpConfig().auth.user },
@@ -94,11 +111,13 @@ async function deliver(to, subject, html, text) {
       attachments: [{ filename: 'ms-traders.png', path: path.join(__dirname, '../../assets/email-logo.png'), cid: 'ms-traders-logo', contentDisposition: 'inline' }],
       disableUrlAccess: true,
     });
-    return { delivered: Array.isArray(result.accepted) && result.accepted.length > 0 };
+    const delivered = Array.isArray(result.accepted) && result.accepted.length > 0;
+    return { delivered, ...(delivered ? { provider: 'SMTP' } : { error: resendError || 'SMTP server did not accept the email.' }) };
   } catch (error) {
     // Never log codes, credentials or reset URLs, including in development.
-    console.error('Nodemailer SMTP delivery failed:', smtpFailure(error));
-    return { delivered: false };
+    const failure = smtpFailure(error);
+    console.error('Nodemailer SMTP delivery failed:', failure);
+    return { delivered: false, error: resendError ? `${resendError} SMTP fallback failed: ${failure.hint}` : failure.hint };
   }
 }
 

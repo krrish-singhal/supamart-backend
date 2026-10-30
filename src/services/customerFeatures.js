@@ -23,10 +23,18 @@ function validateOrderRatings(order, userId, input, userRole = null) {
   if (userRole !== 'ADMIN' && String(order.userId || '') !== String(userId || '')) {
     throw Object.assign(new Error('Forbidden'), { statusCode: 403 });
   }
-  if (order.status !== 'DELIVERED' && order.status !== 'PENDING_CONFIRMATION') {
+  const ratableStatuses = ['DELIVERED', 'PENDING_CONFIRMATION', 'OUT_FOR_DELIVERY', 'DISPATCHED'];
+  if (!ratableStatuses.includes(order.status)) {
     throw Object.assign(new Error('You can rate an order after delivery'), { statusCode: 409 });
   }
-  const value = validate(ratingSchema, input);
+  let sanitizedInput = input;
+  if (input && Array.isArray(input.productRatings)) {
+    sanitizedInput = {
+      ...input,
+      productRatings: input.productRatings.filter((p) => p && Number(p.rating) >= 1 && Number(p.rating) <= 5),
+    };
+  }
+  const value = validate(ratingSchema, sanitizedInput);
   const purchased = new Set(
     (order.items || []).flatMap((item) => [
       item.productId,

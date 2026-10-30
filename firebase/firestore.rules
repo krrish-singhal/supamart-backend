@@ -92,7 +92,7 @@ service cloud.firestore {
 
     // ── Admin Alerts: real-time operational alerts (low stock, stockouts) ──
     match /adminAlerts/{id} {
-      allow read: if isSignedIn();
+      allow read: if true;
       allow write: if false;
     }
 

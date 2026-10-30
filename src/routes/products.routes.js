@@ -73,6 +73,77 @@ router.get(
       return res.json(defaultProductsCache);
     }
 
+    try {
+      const allCached = await getCachedProducts();
+      if (Array.isArray(allCached) && allCached.length > 0) {
+        let filtered = [...allCached];
+
+        if (categoryId) {
+          const allCats = await getCategoryTree();
+          const targetIds = [categoryId];
+          for (let index = 0; index < targetIds.length; index += 1) {
+            allCats
+              .filter((category) => category.parentId === targetIds[index])
+              .forEach((category) => {
+                if (!targetIds.includes(category.id)) targetIds.push(category.id);
+              });
+          }
+          const targetSet = new Set(targetIds);
+          filtered = filtered.filter((p) => p.categoryId && targetSet.has(p.categoryId));
+        }
+
+        if (brandId) {
+          filtered = filtered.filter((p) => p.brandId === brandId);
+        }
+
+        if (availability) {
+          filtered = filtered.filter((p) => p.availability === availability);
+        } else {
+          filtered = filtered.filter(
+            (p) => p.availability !== AVAILABILITY.UNAVAILABLE
+          );
+        }
+
+        if (featured === "true") filtered = filtered.filter((p) => p.isFeatured === true);
+        if (trending === "true") filtered = filtered.filter((p) => p.isTrending === true);
+        if (bestseller === "true") filtered = filtered.filter((p) => p.isBestseller === true);
+        if (monthlyStockUp === "true") filtered = filtered.filter((p) => p.isMonthlyStockUp === true);
+
+        filtered.sort((a, b) => {
+          const tA = typeof a.createdAt === 'number' ? a.createdAt : (a.createdAt?._seconds ? a.createdAt._seconds * 1000 : 0);
+          const tB = typeof b.createdAt === 'number' ? b.createdAt : (b.createdAt?._seconds ? b.createdAt._seconds * 1000 : 0);
+          return tB - tA;
+        });
+
+        const pageSize = Math.min(Number(limit) || 20, 100);
+        let startIndex = 0;
+        if (cursor) {
+          const cursorIndex = filtered.findIndex((p) => p.id === cursor);
+          if (cursorIndex !== -1) {
+            startIndex = cursorIndex + 1;
+          }
+        }
+
+        const pageItems = filtered.slice(startIndex, startIndex + pageSize);
+        const nextCursor = (startIndex + pageSize < filtered.length) ? pageItems[pageItems.length - 1]?.id : null;
+
+        const result = {
+          items: pageItems,
+          total: filtered.length,
+          cursor: nextCursor,
+        };
+
+        if (isDefaultQuery) {
+          defaultProductsCache = result;
+          defaultProductsCacheTime = Date.now();
+        }
+
+        return res.json(result);
+      }
+    } catch (cacheErr) {
+      console.warn("Cached products filter error, falling back to database query:", cacheErr.message);
+    }
+
     const where = [];
     try {
       if (categoryId) {
@@ -107,6 +178,12 @@ router.get(
         startAfter: cursor || null,
       });
 
+      if (!availability) {
+        result.items = (result.items || []).filter(
+          (p) => p.availability !== AVAILABILITY.UNAVAILABLE
+        );
+      }
+
       if (isDefaultQuery) {
         defaultProductsCache = result;
         defaultProductsCacheTime = Date.now();
@@ -114,6 +191,38 @@ router.get(
 
       res.json(result);
     } catch (err) {
+      // Monthly stock-up is also queried directly by the customer app's live
+      // Firestore listener. Keep the API's initial page working even when the
+      // composite (monthly flag + createdAt) index has not finished deploying.
+      if (monthlyStockUp === "true") {
+        try {
+          let query = db().collection(COLLECTIONS.PRODUCTS).where("isMonthlyStockUp", "==", true);
+          if (brandId) query = query.where("brandId", "==", brandId);
+          if (categoryId) query = query.where("categoryId", "==", categoryId);
+          if (availability) query = query.where("availability", "==", availability);
+          const snapshot = await query.limit(1000).get();
+          let products = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+          if (!availability) products = products.filter((product) => product.availability !== AVAILABILITY.UNAVAILABLE);
+          if (featured === "true") products = products.filter((product) => product.isFeatured === true);
+          if (trending === "true") products = products.filter((product) => product.isTrending === true);
+          if (bestseller === "true") products = products.filter((product) => product.isBestseller === true);
+          products.sort((a, b) => {
+            const createdAt = (value) => typeof value === "number" ? value : value?._seconds ? value._seconds * 1000 : 0;
+            return createdAt(b.createdAt) - createdAt(a.createdAt);
+          });
+          const pageSize = Math.min(Number(limit) || 20, 100);
+          const cursorIndex = cursor ? products.findIndex((product) => product.id === cursor) : -1;
+          const startIndex = cursorIndex >= 0 ? cursorIndex + 1 : 0;
+          const items = products.slice(startIndex, startIndex + pageSize);
+          return res.json({
+            items,
+            total: products.length,
+            cursor: startIndex + pageSize < products.length ? items[items.length - 1]?.id || null : null,
+          });
+        } catch (fallbackError) {
+          console.error("Monthly stock-up product query failed:", fallbackError.message);
+        }
+      }
       if (err.code === 8 || err.message?.includes("Quota exceeded")) {
         console.warn("Firestore quota exceeded in GET /api/products");
         if (defaultProductsCache) return res.json(defaultProductsCache);
@@ -132,6 +241,10 @@ function invalidateProductsCache() {
   invalidateCatalogCache();
   defaultProductsCache = null;
   defaultProductsCacheTime = 0;
+  try {
+    const { invalidateReadsCache } = require("./reads.routes");
+    invalidateReadsCache("products");
+  } catch (_) {}
 }
 
 function stem(word) {
@@ -219,6 +332,9 @@ router.get(
     const scored = [];
 
     for (const prod of allProducts) {
+      if (prod.availability === AVAILABILITY.UNAVAILABLE) {
+        continue;
+      }
       const name = (prod.name || "").toLowerCase();
       const catName = (prod.categoryName || "").toLowerCase();
       const parentCatName = (prod.parentCategoryName || "").toLowerCase();
@@ -342,6 +458,10 @@ router.post(
       updatedAt: now,
     });
     invalidateProductsCache();
+    try {
+      const { invalidateReadsCache } = require("./reads.routes");
+      invalidateReadsCache("products");
+    } catch (_) {}
     res.status(201).json(product);
   })
 );
@@ -387,6 +507,11 @@ router.put(
     try {
       const { invalidateLowStockCache } = require("./admin.routes");
       invalidateLowStockCache();
+    } catch (_) {}
+    try {
+      const { invalidateReadsCache } = require("./reads.routes");
+      invalidateReadsCache("products");
+      invalidateReadsCache(req.params.id);
     } catch (_) {}
 
     if (variants && Array.isArray(variants)) {
@@ -436,6 +561,11 @@ router.delete(
   asyncHandler(async (req, res) => {
     await Products.delete(req.params.id);
     invalidateProductsCache();
+    try {
+      const { invalidateReadsCache } = require("./reads.routes");
+      invalidateReadsCache("products");
+      invalidateReadsCache(req.params.id);
+    } catch (_) {}
     res.json({ id: req.params.id, deleted: true });
   })
 );
@@ -446,16 +576,35 @@ router.patch(
   authenticate,
   requireRole(ROLES.ADMIN),
   asyncHandler(async (req, res) => {
-    const { availability, isAvailableToday, onSale, isOnSale } = req.body;
+    const {
+      availability,
+      isAvailableToday,
+      onSale,
+      isOnSale,
+      showDiscountTag,
+      offerPrice,
+      discountPercent,
+      variants,
+    } = req.body;
     const update = { updatedAt: Date.now() };
     if (availability) update.availability = availability;
     if (typeof isAvailableToday === "boolean") update.isAvailableToday = isAvailableToday;
     if (typeof onSale === "boolean") update.onSale = onSale;
     if (typeof isOnSale === "boolean") update.isOnSale = isOnSale;
+    if (typeof showDiscountTag === "boolean") update.showDiscountTag = showDiscountTag;
+    if (offerPrice !== undefined) update.offerPrice = offerPrice;
+    if (discountPercent !== undefined) update.discountPercent = discountPercent;
+    if (variants) update.variants = variants;
+
     const previous = await Products.findById(req.params.id);
     const updated = await Products.update(req.params.id, update);
     await notifyRestockSubscribers(previous, updated);
     invalidateProductsCache();
+    try {
+      const { invalidateReadsCache } = require("./reads.routes");
+      invalidateReadsCache("products");
+      invalidateReadsCache(req.params.id);
+    } catch (_) {}
     res.json(updated);
   })
 );

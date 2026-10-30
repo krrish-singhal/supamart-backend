@@ -338,6 +338,8 @@ router.patch(
         await db().collection(COLLECTIONS.REFUNDS).doc(current.refundId).update({
           status: status === ISSUE_STATUS.RESOLVED ? "REFUND_GRANTED" : "REJECTED",
           rejectReason: resolutionNotes || null,
+          resolutionNotes: resolutionNotes || null,
+          adminMessage: resolutionNotes || null,
           resolvedAt: now,
           updatedAt: now,
         });
@@ -347,6 +349,8 @@ router.patch(
           await refSnap.docs[0].ref.update({
             status: status === ISSUE_STATUS.RESOLVED ? "REFUND_GRANTED" : "REJECTED",
             rejectReason: resolutionNotes || null,
+            resolutionNotes: resolutionNotes || null,
+            adminMessage: resolutionNotes || null,
             resolvedAt: now,
             updatedAt: now,
           });
@@ -388,6 +392,7 @@ router.post(
     let userId = null;
     let orderId = "";
     let orderNo = "";
+    let refundId = "";
 
     if (req.params.id.startsWith("dispute_")) {
       orderId = req.params.id.replace("dispute_", "");
@@ -417,12 +422,48 @@ router.post(
         lastReplyAt: now,
         updatedAt: now,
       });
+      try {
+        // Older issue reports may not have stored refundId even though their
+        // matching refund exists. Resolve it by the order/user pair so the
+        // customer Refund Status screen receives the same live reply.
+        let rRef = iData.refundId
+          ? db().collection(COLLECTIONS.REFUNDS).doc(iData.refundId)
+          : null;
+        let rSnap = rRef ? await rRef.get() : null;
+        if (iData.refundId) refundId = iData.refundId;
+        if ((!rSnap || !rSnap.exists) && orderId && userId) {
+          const matchingRefund = await db().collection(COLLECTIONS.REFUNDS)
+            .where("orderId", "==", orderId)
+            .limit(20)
+            .get();
+          const ownedRefund = matchingRefund.docs.find((refundDoc) => refundDoc.data().userId === userId);
+          if (ownedRefund) {
+            rRef = ownedRefund.ref;
+            rSnap = ownedRefund;
+            refundId = ownedRefund.id;
+          }
+        }
+        if (rSnap?.exists) {
+          const rReplies = rSnap.data().replies || [];
+          await rRef.update({
+            replies: [...rReplies, { text: cleanReply, sentBy: "ADMIN", createdAt: now }],
+            lastReply: cleanReply,
+            lastReplyAt: now,
+            adminMessage: cleanReply,
+            issueId: req.params.id,
+            updatedAt: now,
+          });
+        }
+      } catch (e) {
+        console.warn("Failed to sync reply to refund:", e.message);
+      }
     } else {
       const refundRef = db().collection(COLLECTIONS.REFUNDS).doc(req.params.id);
       const refundDoc = await refundRef.get();
       if (refundDoc.exists) {
         const rData = refundDoc.data();
         userId = rData.userId;
+        refundId = req.params.id;
         orderId = rData.orderId || "";
         orderNo = rData.orderNo || "";
         const existingReplies = rData.replies || [];
@@ -430,12 +471,23 @@ router.post(
           replies: [...existingReplies, { text: cleanReply, sentBy: "ADMIN", createdAt: now }],
           lastReply: cleanReply,
           lastReplyAt: now,
+          adminMessage: cleanReply,
           updatedAt: now,
         });
       } else {
         return res.status(404).json({ error: "Issue not found" });
       }
     }
+
+    // The customer refund screen polls the private reads API; invalidate both
+    // source collections immediately so it sees the newly saved reply on its
+    // next poll instead of waiting for a stale cached document.
+    try {
+      const { invalidateReadsCache } = require("./reads.routes");
+      invalidateReadsCache("issues");
+      invalidateReadsCache("refunds");
+      if (userId) invalidateReadsCache(userId);
+    } catch (_) {}
 
     if (userId) {
       await notifyUser(
@@ -447,6 +499,7 @@ router.post(
           issueId: req.params.id,
           orderId,
           orderNo: String(orderNo),
+          refundId,
         }
       );
     }

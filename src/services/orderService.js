@@ -121,8 +121,9 @@ async function placeOrder({ userId, cartItems, couponCode, address, notes, payme
     const { ref: cfgRef, data: config } = await getConfig(tx);
 
     // Check after idempotency lookup: retrying an already-created order stays safe after closing.
-    if (!storeStatus().isOpen) {
-      throw Object.assign(new Error('The shop is closed. Order daily from 10 AM to 11 PM (India time).'), {
+    const currentStatus = storeStatus(Date.now(), config);
+    if (!currentStatus.isOpen) {
+      throw Object.assign(new Error(currentStatus.label || 'The shop is closed. Order daily from 10 AM to 11 PM (India time).'), {
         statusCode: 422, code: 'STORE_CLOSED',
       });
     }
@@ -150,15 +151,30 @@ async function placeOrder({ userId, cartItems, couponCode, address, notes, payme
     for (const ci of cartItems) {
       const product = products.get(ci.productId);
       if (!product) throw Object.assign(new Error(`Product ${ci.productId} not found`), { statusCode: 422 });
-      if (product.availability === AVAILABILITY.OUT_OF_STOCK) {
-        throw Object.assign(new Error(`${product.name} is out of stock`), { statusCode: 422, code: "OUT_OF_STOCK" });
+      if (
+        product.availability === AVAILABILITY.OUT_OF_STOCK ||
+        product.availability === AVAILABILITY.UNAVAILABLE
+      ) {
+        throw Object.assign(new Error(`${product.name} is currently out of stock`), {
+          statusCode: 422,
+          code: "OUT_OF_STOCK",
+          outOfStockItem: { productId: product.id, name: product.name, variantId: ci.variantId },
+        });
       }
       const variant = product.variants.find((v) => v.id === ci.variantId);
       if (!variant) throw Object.assign(new Error("Variant not found"), { statusCode: 422 });
       if (variant.stock < ci.qty) {
         throw Object.assign(
-          new Error(`Only ${variant.stock} unit(s) of ${product.name} (${variant.label}) available`),
-          { statusCode: 422, code: "INSUFFICIENT_STOCK" }
+          new Error(
+            variant.stock <= 0
+              ? `${product.name} is out of stock`
+              : `Only ${variant.stock} unit(s) of ${product.name} (${variant.label}) available`
+          ),
+          {
+            statusCode: 422,
+            code: variant.stock <= 0 ? "OUT_OF_STOCK" : "INSUFFICIENT_STOCK",
+            outOfStockItem: { productId: product.id, name: product.name, variantId: ci.variantId, availableStock: variant.stock },
+          }
         );
       }
     }
@@ -185,6 +201,12 @@ async function placeOrder({ userId, cartItems, couponCode, address, notes, payme
           statusCode: 422,
           code: "INVALID_COUPON",
         });
+      }
+      if (offer.minValue && subtotal < offer.minValue) {
+        throw Object.assign(
+          new Error(`Minimum order value for coupon ${cleanCouponCode} is ₹${offer.minValue}`),
+          { statusCode: 422, code: "BELOW_COUPON_MIN_ORDER" }
+        );
       }
       discount = computeDiscount(offer, subtotal, items, products);
     }
@@ -269,7 +291,6 @@ async function placeOrder({ userId, cartItems, couponCode, address, notes, payme
       discount,
       total,
       distanceKm: geo.distanceKm,
-      estimatedDeliveryAt: now + Math.ceil((config.preparationMinutes ?? 15) + geo.distanceKm / (config.deliverySpeedKmph || 20) * 60) * 60000,
       status: ORDER_STATUS.PLACED,
       statusHistory: [{ status: ORDER_STATUS.PLACED, at: now }],
       assignedPartnerId: null,
@@ -348,9 +369,11 @@ async function placeOrder({ userId, cartItems, couponCode, address, notes, payme
     return { order: { id: orderRef.id, ...order }, lowStockItems };
   });
 
-  // Always invalidate low stock cache when order is created so admin portal sees accurate stock counts
+  // Always invalidate low stock cache and products read cache when order is created
   try {
     invalidateLowStockCache();
+    const { invalidateReadsCache } = require("../routes/reads.routes");
+    invalidateReadsCache("products");
   } catch (_) {}
 
   if (result?.lowStockItems && result.lowStockItems.length > 0) {
@@ -462,9 +485,18 @@ async function updateStatus(orderId, nextStatus, user) {
     }
 
     const now = Date.now();
+    const etaFields = nextStatus === ORDER_STATUS.OUT_FOR_DELIVERY
+      ? {
+          outForDeliveryAt: now,
+          estimatedDeliveryAt: Number.isFinite(Number(order.distanceKm)) && Number(order.distanceKm) > 0
+            ? now + (Math.ceil(Math.max(2, Math.min(180, Number(order.distanceKm) * 1.3 / 20 * 60)) + (Number(order.deliveryDelayMinutes) || 0)) * 60000)
+            : null,
+        }
+      : {};
     tx.update(ref, {
       status: nextStatus,
       statusHistory: [...order.statusHistory, { status: nextStatus, at: now }],
+      ...etaFields,
       updatedAt: now,
     });
 
@@ -517,6 +549,7 @@ async function updateStatus(orderId, nextStatus, user) {
     const { invalidateReadsCache } = require("../routes/reads.routes");
     invalidateReadsCache(orderId);
     if (order.userId) invalidateReadsCache(order.userId);
+    invalidateReadsCache("products");
     invalidateLowStockCache();
   } catch (_) {}
 
@@ -744,6 +777,7 @@ async function rejectPayment(orderId, reason, customReason) {
     const { invalidateReadsCache } = require("../routes/reads.routes");
     invalidateReadsCache(orderId);
     if (order?.userId) invalidateReadsCache(order.userId);
+    invalidateReadsCache("products");
     invalidateLowStockCache();
   } catch (e) {
     console.error("Cache invalidation error:", e);
@@ -753,13 +787,26 @@ async function rejectPayment(orderId, reason, customReason) {
 }
 
 async function confirmDelivery(orderId, userId, rating, review, ratingsData) {
-  const ref = db().collection(COLLECTIONS.ORDERS).doc(orderId);
+  let resolvedOrderId = orderId;
+  let ref = db().collection(COLLECTIONS.ORDERS).doc(orderId);
+  const directSnap = await ref.get();
+  if (!directSnap.exists) {
+    const num = Number(orderId);
+    if (!isNaN(num)) {
+      const qSnap = await db().collection(COLLECTIONS.ORDERS).where("orderNo", "==", num).limit(1).get();
+      if (!qSnap.empty) {
+        ref = qSnap.docs[0].ref;
+        resolvedOrderId = qSnap.docs[0].id;
+      }
+    }
+  }
+
   const order = await db().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) throw Object.assign(new Error("Order not found"), { statusCode: 404 });
     const orderData = snap.data();
     
-    if (orderData.userId !== userId) {
+    if (orderData.userId && orderData.userId !== userId) {
       throw Object.assign(new Error("Forbidden"), { statusCode: 403 });
     }
     if (orderData.status !== ORDER_STATUS.PENDING_CONFIRMATION && orderData.status !== ORDER_STATUS.DELIVERED) {
@@ -795,26 +842,46 @@ async function confirmDelivery(orderId, userId, rating, review, ratingsData) {
 
     tx.update(ref, updatePayload);
 
-    return { ...orderData, ...updatePayload, id: orderId };
+    return { ...orderData, ...updatePayload, id: resolvedOrderId };
   });
 
   const notification = STATUS_NOTIFICATION[ORDER_STATUS.DELIVERED];
   if (notification) {
     const [title, body] = notification(order.orderNo);
-    notifyUser(userId, title, body, { type: "ORDER_STATUS", status: ORDER_STATUS.DELIVERED, orderId }).catch(e => console.error(e));
+    notifyUser(userId, title, body, { type: "ORDER_STATUS", status: ORDER_STATUS.DELIVERED, orderId: resolvedOrderId }).catch(e => console.error(e));
   }
+
+  try {
+    const { invalidateReadsCache } = require("../routes/reads.routes");
+    invalidateReadsCache(resolvedOrderId);
+    if (userId) invalidateReadsCache(userId);
+    invalidateReadsCache("orders");
+  } catch (_) {}
 
   return order;
 }
 
 async function disputeDelivery(orderId, userId) {
-  const ref = db().collection(COLLECTIONS.ORDERS).doc(orderId);
+  let resolvedOrderId = orderId;
+  let ref = db().collection(COLLECTIONS.ORDERS).doc(orderId);
+  const directSnap = await ref.get();
+  if (!directSnap.exists) {
+    const num = Number(orderId);
+    if (!isNaN(num)) {
+      const qSnap = await db().collection(COLLECTIONS.ORDERS).where("orderNo", "==", num).limit(1).get();
+      if (!qSnap.empty) {
+        ref = qSnap.docs[0].ref;
+        resolvedOrderId = qSnap.docs[0].id;
+      }
+    }
+  }
+
   const order = await db().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) throw Object.assign(new Error("Order not found"), { statusCode: 404 });
     const orderData = snap.data();
     
-    if (orderData.userId !== userId) {
+    if (orderData.userId && orderData.userId !== userId) {
       throw Object.assign(new Error("Forbidden"), { statusCode: 403 });
     }
     if (orderData.status !== ORDER_STATUS.PENDING_CONFIRMATION) {
@@ -828,7 +895,7 @@ async function disputeDelivery(orderId, userId) {
       updatedAt: now,
     });
 
-    return { ...orderData, id: orderId, status: ORDER_STATUS.DELIVERY_DISPUTED };
+    return { ...orderData, id: resolvedOrderId, status: ORDER_STATUS.DELIVERY_DISPUTED };
   });
 
   // Also record this as an active customer issue in COLLECTIONS.ISSUES so Admin Portal -> Issues sees it immediately
@@ -862,6 +929,13 @@ async function disputeDelivery(orderId, userId) {
     const [title, body] = notification(order.orderNo);
     notifyUser(userId, title, body, { type: "ORDER_STATUS", status: ORDER_STATUS.DELIVERY_DISPUTED, orderId }).catch(e => console.error(e));
   }
+
+  try {
+    const { invalidateReadsCache } = require("../routes/reads.routes");
+    invalidateReadsCache(orderId);
+    if (userId) invalidateReadsCache(userId);
+    invalidateReadsCache("orders");
+  } catch (_) {}
 
   return order;
 }

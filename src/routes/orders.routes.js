@@ -5,11 +5,74 @@ const { placeOrder, updateStatus, markPaymentClaimed, markPaid, rejectPayment, h
 const { createPayment } = require("../services/paymentService");
 const { sendOwnerWhatsApp, notifyAdminsNewOrder, notifyUser } = require("../services/notificationService");
 const { Orders, DeliveryPartners, Users } = require("../models");
-const { db } = require("../config/firebase");
+const { db, authAdmin } = require("../config/firebase");
 const { ROLES, ORDER_STATUS, COLLECTIONS, REFUND_STATUS } = require("../config/constants");
-const { invalidateReadsCache } = require("./reads.routes");
+const { storeStatus } = require("../config/storeHours");
+const { invalidateReadsCache, onInvalidateReadsCache } = require("./reads.routes");
+const { enqueueDeliveryDelayEmail, processDeliveryDelayEmail } = require("../services/deliveryDelayEmailQueue");
 
 const router = express.Router();
+
+// In-memory cache for user orders (/mine), buy-again, and individual order lookups (/:id)
+// Drastically cuts Firestore reads from polling and screen focus events
+const userOrdersCache = new Map();
+const USER_ORDERS_CACHE_TTL_MS = 20 * 1000; // 20s
+const orderDetailCache = new Map();
+const ORDER_DETAIL_CACHE_TTL_MS = 10 * 1000; // 10s
+const buyAgainCache = new Map();
+const BUY_AGAIN_CACHE_TTL_MS = 30 * 1000; // 30s
+
+function invalidateOrderMemoryCache(pathSubstring) {
+  if (!pathSubstring) {
+    userOrdersCache.clear();
+    orderDetailCache.clear();
+    buyAgainCache.clear();
+    return;
+  }
+  const clean = String(pathSubstring).trim();
+  orderDetailCache.delete(clean);
+  for (const key of userOrdersCache.keys()) {
+    if (key.includes(clean)) userOrdersCache.delete(key);
+  }
+  buyAgainCache.delete(clean);
+}
+
+onInvalidateReadsCache(invalidateOrderMemoryCache);
+
+function parseDelayMinutes(input, currentEta, now) {
+  if (typeof input === 'number' && Number.isFinite(input)) {
+    const minutes = input > 1_000_000_000_000
+      ? Math.ceil((input - currentEta) / 60000)
+      : Math.ceil(input);
+    return minutes > 0 ? minutes : null;
+  }
+
+  const value = String(input || '').trim();
+  const minuteMatch = value.match(/\+?\s*(\d+(?:\.\d+)?)\s*(?:min|mins|minutes?)\b/i) || value.match(/^\+?\s*(\d+(?:\.\d+)?)$/i);
+  if (minuteMatch) {
+    const minutes = Math.ceil(Number(minuteMatch[1]));
+    return minutes > 0 ? minutes : null;
+  }
+
+  // Also accept a target clock time such as "Arriving by 5:30 PM". Convert it
+  // to the extra time beyond the existing ETA, using the store's India timezone.
+  const clockMatch = value.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+  if (!clockMatch) return null;
+  let hour = Number(clockMatch[1]);
+  const minute = Number(clockMatch[2]);
+  const meridiem = clockMatch[3]?.toUpperCase();
+  if (minute > 59 || hour > (meridiem ? 12 : 23) || hour < (meridiem ? 1 : 0)) return null;
+  if (meridiem) hour = (hour % 12) + (meridiem === 'PM' ? 12 : 0);
+  const dateParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date(now));
+  const part = (type) => Number(dateParts.find((entry) => entry.type === type)?.value);
+  let target = Date.UTC(part('year'), part('month') - 1, part('day'), hour, minute) - 330 * 60000;
+  const baseEta = Number.isFinite(currentEta) && currentEta > now ? currentEta : now;
+  if (target <= baseEta) target += 24 * 60 * 60000;
+  const delayMinutes = Math.ceil((target - baseEta) / 60000);
+  return delayMinutes > 0 ? delayMinutes : null;
+}
 
 // POST /api/orders  (customer places order)
 router.post(
@@ -20,6 +83,22 @@ router.post(
     const idempotencyKey = req.headers["x-idempotency-key"] || null;
     if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
       return res.status(422).json({ error: "cartItems is required" });
+    }
+
+    try {
+      const cfgSnap = await db().collection(COLLECTIONS.CONFIG).doc("global").get();
+      if (cfgSnap.exists) {
+        const cfg = cfgSnap.data();
+        const status = storeStatus(Date.now(), cfg);
+        if (!status.isOpen) {
+          return res.status(422).json({
+            error: status.label || "Store is currently closed for orders. Please try again during store hours.",
+            code: "STORE_CLOSED",
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("Store status check failed:", e.message);
     }
     const order = await placeOrder({
       userId: req.user.uid,
@@ -33,6 +112,8 @@ router.post(
     await createPayment(order.paymentMethod, order);
     await sendOwnerWhatsApp(order);
     await notifyAdminsNewOrder(order);
+    invalidateReadsCache(order.id);
+    if (order.userId) invalidateReadsCache(order.userId);
     res.status(201).json(order);
   })
 );
@@ -79,6 +160,12 @@ router.get(
   "/mine",
   authenticate,
   asyncHandler(async (req, res) => {
+    const cacheKey = `${req.user.uid}:${req.query.limit || 20}:${req.query.cursor || ''}`;
+    const cached = userOrdersCache.get(cacheKey);
+    if (cached && Date.now() - cached.time < USER_ORDERS_CACHE_TTL_MS) {
+      return res.json(cached.data);
+    }
+
     const result = await Orders.paginate({
       where: [["userId", "==", req.user.uid]],
       orderBy: { field: "createdAt", dir: "desc" },
@@ -90,12 +177,18 @@ router.get(
     // would incorrectly exclude every doc that's missing the field outright, not just
     // ones explicitly set to true.
     result.items = result.items.filter((o) => !o.hiddenFromUser);
+    userOrdersCache.set(cacheKey, { time: Date.now(), data: result });
     res.json(result);
   })
 );
 
 // Complete purchase history, independent of order-history pagination.
 router.get('/buy-again', authenticate, asyncHandler(async (req, res) => {
+  const cached = buyAgainCache.get(req.user.uid);
+  if (cached && Date.now() - cached.time < BUY_AGAIN_CACHE_TTL_MS) {
+    return res.json(cached.data);
+  }
+
   const { boughtProducts } = require('../services/customerFeatures');
   const { Products } = require('../models');
   const snap = await db().collection(COLLECTIONS.ORDERS).where('userId', '==', req.user.uid).get();
@@ -188,28 +281,23 @@ router.get('/buy-again', authenticate, asyncHandler(async (req, res) => {
     };
   });
 
-  res.json({
+  const buyAgainData = {
     items,
     recentOrders,
     totalOrdersCount: validOrders.length,
-  });
+  };
+  buyAgainCache.set(req.user.uid, { time: Date.now(), data: buyAgainData });
+  res.json(buyAgainData);
 }));
 
 router.patch('/:id/ratings', authenticate, asyncHandler(async (req, res) => {
   const { validateOrderRatings } = require('../services/customerFeatures');
   const now = Date.now();
-  let targetRef = db().collection(COLLECTIONS.ORDERS).doc(req.params.id);
-  const snapCheck = await targetRef.get();
-  if (!snapCheck.exists) {
-    const byNo = await db()
-      .collection(COLLECTIONS.ORDERS)
-      .where("orderNo", "==", Number(req.params.id) || req.params.id)
-      .limit(1)
-      .get();
-    if (!byNo.empty) {
-      targetRef = byNo.docs[0].ref;
-    }
+  const foundOrder = await findOrderByIdOrOrderNo(req.params.id);
+  if (!foundOrder) {
+    return res.status(404).json({ error: "Order not found" });
   }
+  const targetRef = db().collection(COLLECTIONS.ORDERS).doc(foundOrder.id);
 
   const result = await db().runTransaction(async tx => {
     const snap = await tx.get(targetRef);
@@ -236,6 +324,7 @@ router.patch('/:id/ratings', authenticate, asyncHandler(async (req, res) => {
     return ratings;
   });
   invalidateReadsCache(targetRef.id);
+  if (foundOrder.userId) invalidateReadsCache(foundOrder.userId);
   res.json(result);
 }));
 
@@ -290,6 +379,12 @@ router.get(
   "/:id",
   authenticate,
   asyncHandler(async (req, res) => {
+    const cacheKey = `${req.params.id}:${req.user.uid}`;
+    const cached = orderDetailCache.get(cacheKey);
+    if (cached && Date.now() - cached.time < ORDER_DETAIL_CACHE_TTL_MS) {
+      return res.json(cached.data);
+    }
+
     const order = await findOrderByIdOrOrderNo(req.params.id);
     if (!order) return res.status(404).json({ error: "Order not found" });
     const isAdmin = req.user.role === ROLES.ADMIN;
@@ -322,6 +417,7 @@ router.get(
         }
       } catch (_) {}
     }
+    orderDetailCache.set(cacheKey, { time: Date.now(), data: order });
     res.json(order);
   })
 );
@@ -548,10 +644,30 @@ router.patch(
     if (req.user.role === ROLES.PARTNER && order.assignedPartnerId !== req.user.uid) {
       return res.status(403).json({ error: "Forbidden: Order not assigned to you" });
     }
+
+    try {
+      const cfgSnap = await db().collection(COLLECTIONS.CONFIG).doc("global").get();
+      if (cfgSnap.exists) {
+        const cfg = cfgSnap.data();
+        const status = storeStatus(Date.now(), cfg);
+        if (!status.isOpen) {
+          return res.status(422).json({
+            error: "Shop is currently closed. Delivery partners cannot accept new orders while the shop is closed.",
+            code: "STORE_CLOSED",
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("Store status check failed:", e.message);
+    }
     const now = Date.now();
     const updatePayload = {
       deliveryAcceptanceStatus: "ACCEPTED",
       status: ORDER_STATUS.OUT_FOR_DELIVERY,
+      outForDeliveryAt: now,
+      estimatedDeliveryAt: Number.isFinite(Number(order.distanceKm)) && Number(order.distanceKm) > 0
+        ? now + (Math.ceil(Math.max(2, Math.min(180, Number(order.distanceKm) * 1.3 / 20 * 60)) + (Number(order.deliveryDelayMinutes) || 0)) * 60000)
+        : null,
       statusHistory: [
         ...(order.statusHistory || []),
         { status: ORDER_STATUS.OUT_FOR_DELIVERY, at: now, note: "Partner accepted delivery" },
@@ -560,6 +676,20 @@ router.patch(
     };
     const updated = await Orders.update(order.id, updatePayload);
     invalidateReadsCache(order.id);
+
+    // Update partner status in deliveryPartners collection
+    if (order.assignedPartnerId) {
+      try {
+        await DeliveryPartners.update(order.assignedPartnerId, {
+          status: "on_delivery",
+          lastAssignedOrder: order.id,
+          updatedAt: now,
+        });
+        invalidateReadsCache(`deliveryPartners/${order.assignedPartnerId}`);
+      } catch (err) {
+        console.warn("Could not update deliveryPartner doc status:", err.message);
+      }
+    }
 
     // Notify customer that delivery boy is on the way
     notifyUser(
@@ -629,16 +759,18 @@ router.patch(
     const cleanReason = String(delayReason).trim();
     const now = Date.now();
 
-    // Parse new estimated time if possible into timestamp, or keep string
-    let newEtaTimestamp = now + 30 * 60000;
-    if (typeof newEstimatedTime === "number") {
-      newEtaTimestamp = newEstimatedTime;
-    } else if (typeof newEstimatedTime === "string") {
-      const matchMins = newEstimatedTime.match(/(\d+)\s*min/i);
-      if (matchMins) {
-        newEtaTimestamp = now + parseInt(matchMins[1], 10) * 60000;
-      }
+    // Reported time is an added delay, not a replacement countdown. Add it to
+    // the current ETA and retain the accumulated delay for future GPS updates.
+    const previousEta = Number(order.estimatedDeliveryAt);
+    const baseEta = Number.isFinite(previousEta) && previousEta > now ? previousEta : now;
+    const addedDelayMinutes = parseDelayMinutes(newEstimatedTime, baseEta, now);
+    if (!addedDelayMinutes) {
+      return res.status(422).json({ error: 'Enter a positive delay in minutes or a later clock time.' });
     }
+    const newEtaTimestamp = baseEta + addedDelayMinutes * 60000;
+    const previousDelayMinutes = Number(order.deliveryDelayMinutes ?? order.deliveryDelay?.totalDelayMinutes) || 0;
+    const totalDelayMinutes = previousDelayMinutes + addedDelayMinutes;
+    const liveEtaLabel = `~${Math.max(1, Math.ceil((newEtaTimestamp - now) / 60000))} mins`;
 
     const updatedBy = req.user.role === ROLES.ADMIN ? "Store Admin" : "Delivery Partner";
     const displayOrderNo = order.orderNo || order.displayId || (order.id ? order.id.slice(-4) : "---");
@@ -647,11 +779,14 @@ router.patch(
       delayReason: cleanReason,
       delayReportedAt: now,
       deliveryDelay: {
-        newEstimatedTime: String(newEstimatedTime),
+        newEstimatedTime: liveEtaLabel,
+        reportedDelayMinutes: addedDelayMinutes,
+        totalDelayMinutes,
         delayReason: cleanReason,
         reportedAt: now,
         reportedBy: updatedBy,
       },
+      deliveryDelayMinutes: totalDelayMinutes,
       estimatedDeliveryAt: newEtaTimestamp,
       updatedAt: now,
     };
@@ -659,16 +794,21 @@ router.patch(
     const updated = await Orders.update(order.id, updatePayload);
     invalidateReadsCache(order.id);
 
-    // 1. Auto-shoot email to customer (mandatory default task)
-    const { sendDeliveryDelayEmail } = require("../services/emailService");
-    let targetEmail = order.userEmail || order.email || order.addressSnapshot?.email;
+    // 1. Send the customer email from the backend in both local and production builds.
+    const validEmail = (value) => {
+      const email = String(value || '').trim();
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
+    };
+    let targetEmail = [order.userEmail, order.email, order.addressSnapshot?.email]
+      .map(validEmail)
+      .find(Boolean) || null;
     let targetName = order.userName || order.name || order.addressSnapshot?.name || "Customer";
     if (!targetEmail && order.userId) {
       try {
         const uSnap = await db().collection(COLLECTIONS.USERS).doc(order.userId).get();
         if (uSnap.exists) {
           const uData = uSnap.data();
-          targetEmail = uData.email || uData.userEmail;
+          targetEmail = validEmail(uData.email) || validEmail(uData.userEmail);
           if ((!order.userName || order.userName === "Customer") && uData.name) {
             targetName = uData.name;
           }
@@ -678,31 +818,77 @@ router.patch(
       }
     }
 
+    if (!targetEmail && order.userId) {
+      try {
+        const authUser = await authAdmin().getUser(order.userId);
+        targetEmail = validEmail(authUser.email);
+        if ((!order.userName || order.userName === "Customer") && authUser.displayName) {
+          targetName = authUser.displayName;
+        }
+      } catch (e) {
+        console.error("Could not fetch auth email for delivery delay notification:", e?.message || e);
+      }
+    }
+
+    let emailStatus = 'FAILED';
+    let emailError = 'Customer email address is unavailable.';
+    let emailNotificationId = null;
     if (targetEmail) {
-      sendDeliveryDelayEmail(targetEmail, {
-        orderNo: displayOrderNo,
-        customerName: targetName,
-        newEstimatedTime: String(newEstimatedTime),
-        delayReason: cleanReason,
-        updatedBy,
-      }).catch((err) => console.error("Auto delay email failed:", err));
+      try {
+        emailNotificationId = await enqueueDeliveryDelayEmail({
+          orderId: order.id,
+          to: targetEmail,
+          orderNo: displayOrderNo,
+          customerName: targetName,
+          newEstimatedTime: liveEtaLabel,
+          delayReason: cleanReason,
+          updatedBy,
+        });
+        emailStatus = 'PENDING';
+        emailError = null;
+        await db().collection(COLLECTIONS.ORDERS).doc(order.id).update({
+          'deliveryDelay.emailStatus': emailStatus,
+          'deliveryDelay.emailNotificationId': emailNotificationId,
+          'deliveryDelay.emailError': null,
+        });
+        processDeliveryDelayEmail(emailNotificationId).catch((err) => {
+          console.error('Immediate delivery delay email attempt failed:', err?.message || err);
+        });
+      } catch (err) {
+        console.error('Could not queue delivery delay email:', err?.message || err);
+        emailError = 'The delivery update was saved, but the email could not be queued.';
+      }
+    }
+    if (emailStatus === 'FAILED') {
+      await db().collection(COLLECTIONS.ORDERS).doc(order.id).update({
+        'deliveryDelay.emailStatus': emailStatus,
+        'deliveryDelay.emailError': emailError,
+      }).catch((err) => console.warn('Could not save delay email failure status:', err?.message || err));
+      console.error('Delivery delay email unavailable:', emailError);
     }
 
     // 2. Real-time in-app notification & push to customer
     notifyUser(
       order.userId,
       `Delivery Update: Order #${displayOrderNo}`,
-      `Your order is delayed due to: ${cleanReason}. Expected delivery: ${newEstimatedTime}.`,
+      `Your order is delayed due to: ${cleanReason}. Updated ETA: ${liveEtaLabel}. Additional delay: ${addedDelayMinutes} minutes.`,
       {
         type: "DELIVERY_DELAY",
         orderId: req.params.id,
         orderNo: displayOrderNo,
         delayReason: cleanReason,
-        newEstimatedTime: String(newEstimatedTime),
+        newEstimatedTime: liveEtaLabel,
       }
     ).catch((err) => console.error("Delay notifyUser error:", err));
 
-    res.json(updated);
+    res.json({
+      ...updated,
+      deliveryDelay: { ...updated.deliveryDelay, emailStatus, emailNotificationId },
+      emailSent: false,
+      emailQueued: emailStatus === 'PENDING',
+      emailStatus,
+      emailError: emailStatus === 'FAILED' ? emailError : undefined,
+    });
   })
 );
 

@@ -87,6 +87,7 @@ const orderSchema = Joi.object({
     updatedAt: Joi.number().allow(null),
   }).unknown(true).allow(null),
   estimatedDeliveryAt: Joi.number(),
+  deliveryDelayMinutes: Joi.number().min(0),
   ratings: Joi.object({
     orderRating: Joi.number().integer().min(1).max(5),
     review: Joi.string().allow(""),

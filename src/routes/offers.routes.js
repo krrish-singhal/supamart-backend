@@ -177,11 +177,27 @@ router.post(
     // Convert booleans and numbers properly
     offerData.isActive = req.body.isActive === 'true' || req.body.isActive === true;
     if (offerData.value) offerData.value = Number(offerData.value);
-    if (offerData.maxDiscount) offerData.maxDiscount = Number(offerData.maxDiscount);
-    else offerData.maxDiscount = null;
-    
+
     if (offerData.minValue) offerData.minValue = Number(offerData.minValue);
     else offerData.minValue = 0;
+
+    if (offerData.kind === 'FLAT') {
+      offerData.maxDiscount = null;
+      if (offerData.minValue > 0 && offerData.value > offerData.minValue) {
+        return res.status(422).json({
+          error: `Minimum order value (₹${offerData.minValue}) cannot be less than flat discount (₹${offerData.value})`
+        });
+      }
+    } else if (offerData.kind === 'PERCENT') {
+      if (offerData.value <= 0 || offerData.value > 100) {
+        return res.status(422).json({ error: "Percentage discount must be between 1 and 100" });
+      }
+      if (offerData.maxDiscount) offerData.maxDiscount = Number(offerData.maxDiscount);
+      else offerData.maxDiscount = null;
+    } else {
+      if (offerData.maxDiscount) offerData.maxDiscount = Number(offerData.maxDiscount);
+      else offerData.maxDiscount = null;
+    }
 
     if (offerData.sortOrder !== undefined) {
       offerData.sortOrder = offerData.sortOrder != null && offerData.sortOrder !== '' ? Number(offerData.sortOrder) : null;
@@ -195,6 +211,9 @@ router.post(
 
     if (offerData.validFrom) offerData.validFrom = Number(offerData.validFrom);
     if (offerData.validTo) offerData.validTo = Number(offerData.validTo);
+    if (offerData.validFrom && offerData.validTo && offerData.validTo <= offerData.validFrom) {
+      return res.status(422).json({ error: "validTo date must be after validFrom date" });
+    }
     if (offerData.scope === "CART" || !offerData.scopeId) {
       offerData.scopeId = null;
     }
@@ -225,14 +244,31 @@ router.put(
     if (req.body.isActive !== undefined) {
       updateData.isActive = req.body.isActive === 'true' || req.body.isActive === true;
     }
-    if (updateData.value) updateData.value = Number(updateData.value);
-    if (updateData.maxDiscount !== undefined) {
-      if (updateData.maxDiscount) updateData.maxDiscount = Number(updateData.maxDiscount);
-      else updateData.maxDiscount = null;
-    }
+    if (updateData.value !== undefined) updateData.value = Number(updateData.value);
+
     if (updateData.minValue !== undefined) {
       if (updateData.minValue) updateData.minValue = Number(updateData.minValue);
       else updateData.minValue = 0;
+    }
+
+    if (updateData.kind === 'FLAT') {
+      updateData.maxDiscount = null;
+      if (updateData.minValue > 0 && updateData.value && updateData.value > updateData.minValue) {
+        return res.status(422).json({
+          error: `Minimum order value (₹${updateData.minValue}) cannot be less than flat discount (₹${updateData.value})`
+        });
+      }
+    } else if (updateData.kind === 'PERCENT') {
+      if (updateData.value !== undefined && (updateData.value <= 0 || updateData.value > 100)) {
+        return res.status(422).json({ error: "Percentage discount must be between 1 and 100" });
+      }
+      if (updateData.maxDiscount !== undefined) {
+        if (updateData.maxDiscount) updateData.maxDiscount = Number(updateData.maxDiscount);
+        else updateData.maxDiscount = null;
+      }
+    } else if (updateData.maxDiscount !== undefined) {
+      if (updateData.maxDiscount) updateData.maxDiscount = Number(updateData.maxDiscount);
+      else updateData.maxDiscount = null;
     }
     if (updateData.sortOrder !== undefined) {
       updateData.sortOrder = updateData.sortOrder != null && updateData.sortOrder !== '' ? Number(updateData.sortOrder) : null;

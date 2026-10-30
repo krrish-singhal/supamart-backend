@@ -19,19 +19,19 @@ router.get(
   "/",
   asyncHandler(async (req, res) => {
     if (cache && Date.now() - cacheAt < CACHE_TTL_MS) {
-      return res.json({ ...cache, serverTime: Date.now(), storeStatus: storeStatus() });
+      return res.json({ ...cache, serverTime: Date.now(), storeStatus: storeStatus(Date.now(), cache) });
     }
     try {
       const snap = await db().collection(COLLECTIONS.CONFIG).doc("global").get();
       if (snap.exists) {
         cache = withStoreHours(withDeliveryArea({ id: snap.id, ...snap.data() }));
         cacheAt = Date.now();
-        return res.json({ ...cache, serverTime: Date.now(), storeStatus: storeStatus() });
+        return res.json({ ...cache, serverTime: Date.now(), storeStatus: storeStatus(Date.now(), cache) });
       }
     } catch (err) {
       console.warn("Firestore error in /api/config:", err.message);
       if (cache) {
-        return res.json({ ...cache, serverTime: Date.now(), storeStatus: storeStatus() });
+        return res.json({ ...cache, serverTime: Date.now(), storeStatus: storeStatus(Date.now(), cache) });
       }
     }
 
@@ -48,7 +48,7 @@ router.get(
     }));
     cache = fallback;
     cacheAt = Date.now();
-    res.json({ ...cache, serverTime: Date.now(), storeStatus: storeStatus() });
+    res.json({ ...cache, serverTime: Date.now(), storeStatus: storeStatus(Date.now(), cache) });
   })
 );
 
@@ -73,7 +73,7 @@ router.put(
     }
     await db().collection(COLLECTIONS.CONFIG).doc("global").set(withStoreHours(withDeliveryArea(value)));
     cache = null; // invalidate cache
-    res.json({ ...withStoreHours(withDeliveryArea(value)), serverTime: Date.now(), storeStatus: storeStatus() });
+    res.json({ ...withStoreHours(withDeliveryArea(value)), serverTime: Date.now(), storeStatus: storeStatus(Date.now(), value) });
   })
 );
 

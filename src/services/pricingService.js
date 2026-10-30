@@ -22,7 +22,8 @@ function priceCart(cartItems, products) {
       e.statusCode = 409;
       throw e;
     }
-    const unit = variant.offerPrice != null ? variant.offerPrice : variant.price;
+    const isOnSale = (product.onSale === true || product.isOnSale === true) && product.onSale !== false && product.isOnSale !== false;
+    const unit = isOnSale && variant.offerPrice != null ? variant.offerPrice : variant.price;
     subtotal += unit * ci.qty;
     return {
       productId: ci.productId,
@@ -69,9 +70,13 @@ function computeDiscount(offer, subtotal, items, products) {
     if (base <= 0) return 0; // No matching items for this scoped offer
   }
 
-  discount = offer.kind === OFFER_KIND.PERCENT ? (base * offer.value) / 100 : offer.value;
-  if (offer.maxDiscount != null && Number(offer.maxDiscount) > 0) {
-    discount = Math.min(discount, Number(offer.maxDiscount));
+  if (offer.kind === OFFER_KIND.PERCENT) {
+    discount = (base * Number(offer.value)) / 100;
+    if (offer.maxDiscount != null && Number(offer.maxDiscount) > 0) {
+      discount = Math.min(discount, Number(offer.maxDiscount));
+    }
+  } else {
+    discount = Number(offer.value) || 0;
   }
   return Number(Math.min(discount, subtotal).toFixed(2));
 }

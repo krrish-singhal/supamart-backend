@@ -255,13 +255,14 @@ router.post(
     }
     // Collect all FCM tokens from users
     const usersSnap = await db().collection(COLLECTIONS.USERS).get();
-    const tokens = [];
+    const tokens = new Set();
     usersSnap.docs.forEach((d) => {
       const user = d.data();
       if (user.offerNotificationsEnabled === false) return;
       const fcmTokens = user.fcmTokens || [];
-      tokens.push(...fcmTokens);
+      fcmTokens.forEach((token) => tokens.add(token));
     });
+    const tokenList = [...tokens];
     
     // Create record in broadcasts collection
     const record = {
@@ -269,32 +270,45 @@ router.post(
       body,
       audience: audience || "All customers",
       targetScreen: targetScreen || "Home screen",
-      delivered: tokens.length,
+      delivered: tokenList.length,
       opened: 0,
       createdAt: Date.now(),
     };
     const docRef = await db().collection("broadcasts").add(record);
 
-    // Also persist into reachable users' notification subcollection for in-app drawer
-    const writePromises = usersSnap.docs.map(async (d) => {
-      try {
-        const u = d.data();
-        if (u.offerNotificationsEnabled === false) return;
-        await d.ref.collection("notifications").add({
+    // Persist inbox entries in bounded batches so a broadcast request does not wait
+    // on one network round-trip per customer.
+    const eligibleUsers = usersSnap.docs.filter((d) => d.data().offerNotificationsEnabled !== false);
+    const cacheInvalidations = [];
+    for (let start = 0; start < eligibleUsers.length; start += 450) {
+      const batch = db().batch();
+      const chunk = eligibleUsers.slice(start, start + 450);
+      chunk.forEach((d) => {
+        const notificationRef = d.ref.collection("notifications").doc();
+        batch.set(notificationRef, {
           title,
           body,
           data: { type: "BROADCAST", targetScreen: targetScreen || "Home screen" },
           read: false,
           createdAt: Date.now(),
         });
-      } catch (_) {}
-    });
-    Promise.allSettled(writePromises).catch(() => {});
-
-    if (tokens.length) {
-      await broadcast(tokens, title, body);
+        cacheInvalidations.push(d.id);
+      });
+      await batch.commit();
     }
-    res.json({ id: docRef.id, sent: tokens.length, ...record });
+    try {
+      const { invalidateReadsCache } = require("./reads.routes");
+      cacheInvalidations.forEach((userId) => invalidateReadsCache(`users/${userId}/notifications`));
+    } catch (_) {}
+
+    if (tokenList.length) {
+      // Push providers can be slow or unavailable. The inbox is already committed;
+      // queue push delivery without holding the admin form open.
+      broadcast(tokenList, title, body).catch((err) => {
+        console.error("Broadcast push delivery failed:", err?.message || err);
+      });
+    }
+    res.json({ id: docRef.id, sent: tokenList.length, ...record });
   })
 );
 

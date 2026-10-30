@@ -24,6 +24,7 @@ const refundsRoutes = require("./routes/refunds.routes");
 const issuesRoutes = require("./routes/issues.routes");
 const adminRoutes = require("./routes/admin.routes");
 const pagesRoutes = require("./routes/pages.routes");
+const { startDeliveryDelayEmailWorker } = require("./services/deliveryDelayEmailQueue");
 
 const app = express();
 
@@ -95,6 +96,7 @@ const PORT = process.env.PORT || 5000;
 let server;
 if (require.main === module) {
   server = app.listen(PORT, "0.0.0.0", () => console.log(`MS Traders API running on :${PORT}`));
+  startDeliveryDelayEmailWorker();
   // Allow long-running uploads (Cloudinary can take 30-60s on slow networks)
   server.keepAliveTimeout = 120_000;   // 2 min
   server.headersTimeout   = 125_000;   // slightly above keepAlive
