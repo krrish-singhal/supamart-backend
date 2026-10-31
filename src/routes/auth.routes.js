@@ -464,6 +464,13 @@ router.get(
         user = await DeliveryPartners.findById(req.user.uid);
       } else {
         user = await Users.findById(req.user.uid);
+        if (!user) {
+          const partner = await DeliveryPartners.findById(req.user.uid);
+          if (partner) {
+            user = partner;
+            req.user.role = ROLES.PARTNER;
+          }
+        }
       }
     } catch (err) {
       if (err.code === 8 || err.message?.includes("Quota exceeded")) {

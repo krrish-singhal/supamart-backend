@@ -435,10 +435,16 @@ const STATUS_NOTIFICATION = {
   [ORDER_STATUS.PENDING_CONFIRMATION]: (orderNo) => ["Confirm Delivery", `Your delivery partner marked order #${orderNo} as delivered. Please confirm in the app.`],
   [ORDER_STATUS.DELIVERY_DISPUTED]: (orderNo) => ["Delivery Disputed", `We have registered your dispute for order #${orderNo}. Our team will contact you.`],
   [ORDER_STATUS.DELIVERED]: (orderNo) => ["Delivered", `Your order #${orderNo} has been delivered. Enjoy!`],
-  [ORDER_STATUS.CANCELLED]: (orderNo) => ["Order Cancelled", `Your order #${orderNo} has been cancelled.`],
+  [ORDER_STATUS.CANCELLED]: (orderNo, reason) => [
+    "Order Cancelled",
+    reason
+      ? `Your order #${orderNo} has been cancelled. Reason: ${reason}`
+      : `Your order #${orderNo} has been cancelled.`
+  ],
 };
 
-async function updateStatus(orderId, nextStatus, user) {
+async function updateStatus(orderId, nextStatus, user, options = {}) {
+  const reason = options?.reason || options?.cancelReason || options?.cancellationReason || null;
   const ref = db().collection(COLLECTIONS.ORDERS).doc(orderId);
   const order = await db().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
@@ -485,20 +491,69 @@ async function updateStatus(orderId, nextStatus, user) {
     }
 
     const now = Date.now();
+    let deliveryMinutes = null;
+    if (nextStatus === ORDER_STATUS.OUT_FOR_DELIVERY) {
+      if (order.assignedPartnerId) {
+        try {
+          const pSnap = await tx.get(db().collection(COLLECTIONS.DELIVERY_PARTNERS).doc(order.assignedPartnerId));
+          if (pSnap.exists) {
+            const pData = pSnap.data();
+            const pLoc = pData.currentLocation || pData.location || pData.lastLocation;
+            const address = order.addressSnapshot || order.address;
+            const pLat = Number(pLoc?.lat ?? pLoc?.latitude);
+            const pLng = Number(pLoc?.lng ?? pLoc?.longitude);
+            const dLat = Number(address?.lat ?? address?.latitude);
+            const dLng = Number(address?.lng ?? address?.longitude);
+            if (Number.isFinite(pLat) && Number.isFinite(pLng) && Number.isFinite(dLat) && Number.isFinite(dLng) && (pLat !== 0 || pLng !== 0)) {
+              const { haversineKm } = require("../config/deliveryArea");
+              const remainingKm = haversineKm(pLat, pLng, dLat, dLng) * 1.3;
+              deliveryMinutes = Math.max(2, Math.min(180, Math.ceil(remainingKm / 20 * 60)));
+            }
+          }
+        } catch (_) {}
+      }
+      if (!deliveryMinutes && Number.isFinite(Number(order.distanceKm)) && Number(order.distanceKm) > 0) {
+        deliveryMinutes = Math.max(2, Math.min(180, Math.ceil(Number(order.distanceKm) * 1.3 / 20 * 60)));
+      }
+      if (!deliveryMinutes) deliveryMinutes = 10;
+    }
     const etaFields = nextStatus === ORDER_STATUS.OUT_FOR_DELIVERY
       ? {
           outForDeliveryAt: now,
-          estimatedDeliveryAt: Number.isFinite(Number(order.distanceKm)) && Number(order.distanceKm) > 0
-            ? now + (Math.ceil(Math.max(2, Math.min(180, Number(order.distanceKm) * 1.3 / 20 * 60)) + (Number(order.deliveryDelayMinutes) || 0)) * 60000)
-            : null,
+          estimatedDeliveryAt: now + ((deliveryMinutes + (Number(order.deliveryDelayMinutes) || 0)) * 60000),
         }
       : {};
+
+    const cancellationFields = nextStatus === ORDER_STATUS.CANCELLED ? {
+      cancelReason: reason || null,
+      cancellationReason: reason || null,
+      cancelledBy: user?.role || (user?.uid === order.userId ? "CUSTOMER" : "ADMIN"),
+      cancelledAt: now,
+    } : {};
+
     tx.update(ref, {
       status: nextStatus,
-      statusHistory: [...order.statusHistory, { status: nextStatus, at: now }],
+      statusHistory: [...order.statusHistory, { status: nextStatus, at: now, ...(reason ? { reason } : {}) }],
       ...etaFields,
+      ...cancellationFields,
       updatedAt: now,
     });
+
+    if (nextStatus === ORDER_STATUS.CANCELLED) {
+      const cancelAlertRef = db().collection(COLLECTIONS.ADMIN_ALERTS || "adminAlerts").doc();
+      tx.set(cancelAlertRef, {
+        type: "ORDER_CANCELLED",
+        orderId: ref.id,
+        orderNo: order.orderNo,
+        customerName: order.userName || order.customerName || "Customer",
+        customerPhone: order.userPhone || order.phone || "",
+        total: order.total,
+        reason: reason || "No reason specified",
+        cancelledBy: user?.role || (user?.uid === order.userId ? "CUSTOMER" : "ADMIN"),
+        createdAt: now,
+        read: false,
+      });
+    }
 
     if (nextStatus === ORDER_STATUS.CANCELLED && productSnaps.length > 0) {
       const products = new Map();
@@ -536,19 +591,25 @@ async function updateStatus(orderId, nextStatus, user) {
         releaseCouponInTx(tx, order.userId, order.couponCode, order.couponId);
       }
     }
-    return { ...order, id: orderId, status: nextStatus };
+    return { ...order, id: orderId, status: nextStatus, cancelReason: reason || null };
   });
 
   const notification = STATUS_NOTIFICATION[nextStatus];
   if (notification) {
-    const [title, body] = notification(order.orderNo);
-    notifyUser(order.userId, title, body, { type: "ORDER_STATUS", status: nextStatus, orderId }).catch(e => console.error(e));
+    const [title, body] = notification(order.orderNo, reason);
+    notifyUser(order.userId, title, body, {
+      type: "ORDER_STATUS",
+      status: nextStatus,
+      orderId,
+      ...(reason ? { reason } : {})
+    }).catch(e => console.error(e));
   }
 
   try {
     const { invalidateReadsCache } = require("../routes/reads.routes");
     invalidateReadsCache(orderId);
     if (order.userId) invalidateReadsCache(order.userId);
+    invalidateReadsCache("orders");
     invalidateReadsCache("products");
     invalidateLowStockCache();
   } catch (_) {}

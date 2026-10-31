@@ -48,11 +48,12 @@ router.post('/', optionalAuthenticate, asyncHandler(async (req, res) => {
 
   const isLiveTrackingDoc = (root === 'orders' || root === 'deliveryPartners') && kind === 'doc';
   const LIVE_TRACKING_CACHE_TTL_MS = 10 * 1000; // 10 seconds
-  const isTimeSensitiveCustomerData = root === 'refunds' || (root === 'users' && child === 'notifications');
+  const isTimeSensitiveCustomerData = root === 'refunds' || root === 'orders' || (root === 'users' && child === 'notifications');
+  const TIME_SENSITIVE_CACHE_TTL_MS = 30 * 1000; // 30 seconds (event-invalidated on write/read)
   const ttl = isLiveTrackingDoc
     ? LIVE_TRACKING_CACHE_TTL_MS
     : isTimeSensitiveCustomerData
-      ? 2_000
+      ? TIME_SENSITIVE_CACHE_TTL_MS
       : (isPublic ? PUBLIC_READS_CACHE_TTL_MS : PRIVATE_READS_CACHE_TTL_MS);
   const cacheKey = isPublic
     ? JSON.stringify({ scope: 'public', path, kind, constraints, cursor })

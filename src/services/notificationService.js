@@ -100,7 +100,17 @@ async function notifyLowStockToCartHolders(productId, remainingStock, productNam
     const body = `Only ${remainingStock} left in stock. Place your order now before it sells out!`;
     const data = { type: "LOW_STOCK", productId: String(productId) };
 
-    const cartsSnap = await db().collection(COLLECTIONS.CARTS).get();
+    const recentCutoff = Date.now() - 24 * 60 * 60 * 1000;
+    let cartsSnap;
+    try {
+      cartsSnap = await db()
+        .collection(COLLECTIONS.CARTS)
+        .where("updatedAt", ">=", recentCutoff)
+        .limit(50)
+        .get();
+    } catch (_) {
+      cartsSnap = await db().collection(COLLECTIONS.CARTS).limit(50).get();
+    }
     const targetedUsers = [];
     for (const doc of cartsSnap.docs) {
       const cart = doc.data();

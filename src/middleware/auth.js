@@ -22,9 +22,23 @@ async function authenticate(req, res, next) {
         decoded.email.toLowerCase() === "krrishsinghal22@gmail.com" ||
         decoded.email.toLowerCase() === "krrishsinghal62@gmail.com"
       );
+      let role = decoded.role;
+      if (!role) {
+        if (isAdminEmail) {
+          role = ROLES.ADMIN;
+        } else {
+          try {
+            const { DeliveryPartners } = require("../models");
+            const partnerDoc = await DeliveryPartners.findById(decoded.uid);
+            if (partnerDoc) {
+              role = ROLES.PARTNER;
+            }
+          } catch (_e) {}
+        }
+      }
       req.user = {
         uid: decoded.uid,
-        role: decoded.role || (isAdminEmail ? ROLES.ADMIN : ROLES.CUSTOMER),
+        role: role || ROLES.CUSTOMER,
         email: decoded.email || null,
         phone: decoded.phone_number || null,
       };
@@ -50,9 +64,19 @@ async function optionalAuthenticate(req, res, next) {
 
     try {
       const decoded = await authAdmin().verifyIdToken(token);
+      let role = decoded.role;
+      if (!role) {
+        try {
+          const { DeliveryPartners } = require("../models");
+          const partnerDoc = await DeliveryPartners.findById(decoded.uid);
+          if (partnerDoc) {
+            role = ROLES.PARTNER;
+          }
+        } catch (_e) {}
+      }
       req.user = {
         uid: decoded.uid,
-        role: decoded.role || ROLES.CUSTOMER,
+        role: role || ROLES.CUSTOMER,
         email: decoded.email || null,
         phone: decoded.phone_number || null,
       };

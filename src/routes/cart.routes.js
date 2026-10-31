@@ -5,8 +5,21 @@ const { Carts, Products } = require("../models");
 const { db } = require("../config/firebase");
 const { priceCart, computeDiscount } = require("../services/pricingService");
 const { COLLECTIONS, AVAILABILITY } = require("../config/constants");
+const { getCachedProducts } = require("../services/catalogCache");
 
 const router = express.Router();
+
+async function resolveProductMap(productIds) {
+  const cached = await getCachedProducts().catch(() => []);
+  const cachedMap = new Map((cached || []).map((p) => [p.id, p]));
+  const docs = await Promise.all(
+    productIds.map(async (id) => {
+      if (cachedMap.has(id)) return cachedMap.get(id);
+      return Products.findById(id);
+    })
+  );
+  return new Map(docs.filter(Boolean).map((p) => [p.id, p]));
+}
 
 // GET /api/cart — get current user's cart with server-repriced totals
 router.get(
@@ -18,12 +31,9 @@ router.get(
       return res.json({ items: [], subtotal: 0, discount: 0, total: 0 });
     }
 
-    // Load products for repricing
+    // Load products for repricing (leverages in-memory catalog to eliminate Firestore reads)
     const productIds = [...new Set(cart.items.map((i) => i.productId))];
-    const productDocs = await Promise.all(productIds.map((id) => Products.findById(id)));
-    const productMap = new Map(
-      productDocs.filter(Boolean).map((p) => [p.id, p])
-    );
+    const productMap = await resolveProductMap(productIds);
 
     // Items whose product was deleted entirely (e.g. a catalog reseed) can never be
     // priced — drop them and persist the cleanup so the cart self-heals instead of
@@ -136,7 +146,7 @@ router.put(
       const requestedQty = Number(item.qty);
       if (requestedQty <= previousQty) continue;
 
-      const product = await Products.findById(item.productId);
+      const product = (await resolveProductMap([item.productId])).get(item.productId);
       const variant = product?.variants?.find((candidate) => candidate.id === (item.variantId || "default"));
       const unavailable =
         !product ||
@@ -156,8 +166,7 @@ router.put(
     if (finalCouponCode && items.length > 0) {
       try {
         const productIds = [...new Set(items.map((i) => i.productId))];
-        const productDocs = await Promise.all(productIds.map((id) => Products.findById(id)));
-        const productMap = new Map(productDocs.filter(Boolean).map((p) => [p.id, p]));
+        const productMap = await resolveProductMap(productIds);
         const { subtotal } = priceCart(items, productMap);
         const snap = await db()
           .collection(COLLECTIONS.OFFERS)

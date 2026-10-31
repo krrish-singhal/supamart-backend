@@ -30,7 +30,9 @@ function invalidateOrderMemoryCache(pathSubstring) {
     return;
   }
   const clean = String(pathSubstring).trim();
-  orderDetailCache.delete(clean);
+  for (const key of orderDetailCache.keys()) {
+    if (key.includes(clean)) orderDetailCache.delete(key);
+  }
   for (const key of userOrdersCache.keys()) {
     if (key.includes(clean)) userOrdersCache.delete(key);
   }
@@ -152,6 +154,63 @@ router.get(
       );
     }
     res.json(result);
+  })
+);
+
+// GET /api/orders/pending-confirmation
+// High-performance real-time check for unconfirmed deliveries (zero cache delay)
+router.get(
+  "/pending-confirmation",
+  authenticate,
+  asyncHandler(async (req, res) => {
+    // 1. Direct check for orders specifically in PENDING_CONFIRMATION where rating is not yet submitted
+    const snap = await db()
+      .collection(COLLECTIONS.ORDERS)
+      .where("userId", "==", req.user.uid)
+      .where("status", "==", ORDER_STATUS.PENDING_CONFIRMATION)
+      .limit(5)
+      .get();
+
+    if (!snap.empty) {
+      const unrated = snap.docs.find((d) => {
+        const data = d.data();
+        const hasRating = Boolean(
+          (data.ratings && (data.ratings.orderRating || data.ratings.ratedAt || Object.keys(data.ratings).length > 0)) ||
+          (data.deliveryRating != null && data.deliveryRating !== 0) ||
+          (data.rating != null && data.rating !== 0)
+        );
+        return !hasRating;
+      });
+      if (unrated) {
+        return res.json({ order: { id: unrated.id, ...unrated.data() } });
+      }
+    }
+
+    // 2. Also check if there is an unconfirmed recently DELIVERED order where rating is not yet submitted
+    const deliveredSnap = await db()
+      .collection(COLLECTIONS.ORDERS)
+      .where("userId", "==", req.user.uid)
+      .where("status", "==", ORDER_STATUS.DELIVERED)
+      .limit(5)
+      .get();
+
+    if (!deliveredSnap.empty) {
+      const unconfirmed = deliveredSnap.docs.find((d) => {
+        const data = d.data();
+        const isRecent = Date.now() - (data.updatedAt || data.createdAt || 0) < 2 * 60 * 60 * 1000;
+        const hasRating = Boolean(
+          (data.ratings && (data.ratings.orderRating || data.ratings.ratedAt || Object.keys(data.ratings).length > 0)) ||
+          (data.deliveryRating != null && data.deliveryRating !== 0) ||
+          (data.rating != null && data.rating !== 0)
+        );
+        return !hasRating && isRecent;
+      });
+      if (unconfirmed) {
+        return res.json({ order: { id: unconfirmed.id, ...unconfirmed.data() } });
+      }
+    }
+
+    res.json({ order: null });
   })
 );
 
@@ -429,8 +488,26 @@ router.patch(
   requireRole(ROLES.ADMIN, ROLES.PARTNER),
   asyncHandler(async (req, res) => {
     if (!req.body.status) return res.status(422).json({ error: "status is required" });
-    const result = await updateStatus(req.params.id, req.body.status, req.user);
+    const reason = req.body.reason || req.body.cancelReason || req.body.cancellationReason || null;
+    const result = await updateStatus(req.params.id, req.body.status, req.user, { reason });
     res.json(result);
+  })
+);
+
+// PATCH /api/orders/:id/note  (admin saves internal note)
+router.patch(
+  "/:id/note",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const { adminNote, note } = req.body;
+    const finalNote = typeof adminNote !== 'undefined' ? adminNote : (note || "");
+    const order = await findOrderByIdOrOrderNo(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    const ref = db().collection(COLLECTIONS.ORDERS).doc(order.id);
+    await ref.update({ adminNote: finalNote, updatedAt: Date.now() });
+    invalidateReadsCache(order.id);
+    res.json({ ok: true, adminNote: finalNote });
   })
 );
 
@@ -505,7 +582,8 @@ router.patch(
     if (nonCancellable.includes(order.status)) {
       return res.status(422).json({ error: "Order cannot be cancelled at this stage", code: "CANNOT_CANCEL" });
     }
-    const result = await updateStatus(order.id, ORDER_STATUS.CANCELLED);
+    const reason = req.body.reason || req.body.cancelReason || req.body.cancellationReason || (req.user.role === ROLES.ADMIN ? "Cancelled by Admin" : "Cancelled by Customer");
+    const result = await updateStatus(order.id, ORDER_STATUS.CANCELLED, req.user, { reason });
 
     // Create refund record if one doesn't exist already
     try {
@@ -661,13 +739,32 @@ router.patch(
       console.warn("Store status check failed:", e.message);
     }
     const now = Date.now();
+    let deliveryMinutes = null;
+    if (order.assignedPartnerId) {
+      try {
+        const p = await DeliveryPartners.findById(order.assignedPartnerId);
+        const pLoc = p?.currentLocation || p?.location || p?.lastLocation;
+        const address = order.addressSnapshot || order.address;
+        const pLat = Number(pLoc?.lat ?? pLoc?.latitude);
+        const pLng = Number(pLoc?.lng ?? pLoc?.longitude);
+        const dLat = Number(address?.lat ?? address?.latitude);
+        const dLng = Number(address?.lng ?? address?.longitude);
+        if (Number.isFinite(pLat) && Number.isFinite(pLng) && Number.isFinite(dLat) && Number.isFinite(dLng) && (pLat !== 0 || pLng !== 0)) {
+          const { haversineKm } = require("../config/deliveryArea");
+          const remainingKm = haversineKm(pLat, pLng, dLat, dLng) * 1.3;
+          deliveryMinutes = Math.max(2, Math.min(180, Math.ceil(remainingKm / 20 * 60)));
+        }
+      } catch (_) {}
+    }
+    if (!deliveryMinutes && Number.isFinite(Number(order.distanceKm)) && Number(order.distanceKm) > 0) {
+      deliveryMinutes = Math.max(2, Math.min(180, Math.ceil(Number(order.distanceKm) * 1.3 / 20 * 60)));
+    }
+    if (!deliveryMinutes) deliveryMinutes = 10;
     const updatePayload = {
       deliveryAcceptanceStatus: "ACCEPTED",
       status: ORDER_STATUS.OUT_FOR_DELIVERY,
       outForDeliveryAt: now,
-      estimatedDeliveryAt: Number.isFinite(Number(order.distanceKm)) && Number(order.distanceKm) > 0
-        ? now + (Math.ceil(Math.max(2, Math.min(180, Number(order.distanceKm) * 1.3 / 20 * 60)) + (Number(order.deliveryDelayMinutes) || 0)) * 60000)
-        : null,
+      estimatedDeliveryAt: now + ((deliveryMinutes + (Number(order.deliveryDelayMinutes) || 0)) * 60000),
       statusHistory: [
         ...(order.statusHistory || []),
         { status: ORDER_STATUS.OUT_FOR_DELIVERY, at: now, note: "Partner accepted delivery" },

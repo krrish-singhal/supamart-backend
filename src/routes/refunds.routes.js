@@ -4,6 +4,7 @@ const { authenticate, requireRole } = require("../middleware/auth");
 const { db } = require("../config/firebase");
 const { COLLECTIONS, ROLES, REFUND_STATUS, ISSUE_STATUS } = require("../config/constants");
 const { notifyUser } = require("../services/notificationService");
+const { invalidateReadsCache } = require("./reads.routes");
 
 const router = express.Router();
 
@@ -123,6 +124,11 @@ router.post(
     } catch (err) {
       console.error("Failed to sync issue from refund request:", err);
     }
+
+    try {
+      invalidateReadsCache("refunds");
+      if (order.userId) invalidateReadsCache(order.userId);
+    } catch (_) {}
 
     res.status(201).json({ id: docRef.id, ...refundData });
   })
@@ -250,6 +256,11 @@ router.patch(
         ).catch(() => {});
       }
 
+      try {
+        invalidateReadsCache("refunds");
+        if (current.userId) invalidateReadsCache(current.userId);
+      } catch (_) {}
+
       return res.json({ id: req.params.id, ...current, ...updatedData });
     }
 
@@ -298,6 +309,11 @@ router.patch(
         ).catch(() => {});
       }
 
+      try {
+        invalidateReadsCache("refunds");
+        if (current.userId) invalidateReadsCache(current.userId);
+      } catch (_) {}
+
       return res.json({ id: req.params.id, ...current, ...updatedData });
     }
 
@@ -326,6 +342,11 @@ router.patch(
       dismissedByUser: true,
       updatedAt: Date.now(),
     });
+
+    try {
+      invalidateReadsCache("refunds");
+      if (current.userId) invalidateReadsCache(current.userId);
+    } catch (_) {}
 
     res.json({ ok: true, dismissed: true });
   })

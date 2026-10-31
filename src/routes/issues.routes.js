@@ -133,6 +133,20 @@ router.post(
       }
     }
 
+    try {
+      await db().collection(COLLECTIONS.ADMIN_ALERTS || "adminAlerts").add({
+        type: "ISSUE_REPORTED",
+        issueId: docRef.id,
+        orderId: actualOrderId,
+        orderNo: issueData.orderNo || "",
+        customerName: issueData.userName || "Customer",
+        issueType: issueType || "Reported Issue",
+        resolutionType: issueData.resolutionType,
+        createdAt: now,
+        read: false,
+      });
+    } catch (_) {}
+
     res.status(201).json({ id: docRef.id, ...issueData });
   })
 );
@@ -274,7 +288,7 @@ router.patch(
   authenticate,
   requireRole(ROLES.ADMIN),
   asyncHandler(async (req, res) => {
-    const { status, resolutionNotes } = req.body;
+    const { status, resolutionNotes, resolutionType } = req.body;
     const now = Date.now();
     let ref = db().collection(COLLECTIONS.ISSUES).doc(req.params.id);
     let doc = await ref.get();
@@ -300,75 +314,165 @@ router.patch(
       const refundDoc = await refundRef.get();
       if (refundDoc.exists) {
         const rData = refundDoc.data();
-        const refundStatus = status === ISSUE_STATUS.RESOLVED ? "REFUND_GRANTED" : "REJECTED";
-        await refundRef.update({
-          status: refundStatus,
-          rejectReason: resolutionNotes || null,
-          resolvedAt: now,
-          updatedAt: now,
-        });
+        const effectiveType = resolutionType || (status === 'REJECTED' ? 'REJECT' : 'REFUND');
+        const refundStatus = effectiveType === 'REJECT' || status === 'REJECTED'
+          ? "REJECTED"
+          : effectiveType === 'REDELIVER'
+          ? "RESOLVED_REDELIVER"
+          : "REFUND_GRANTED";
 
-        if (rData.userId) {
-          notifyUser(
-            rData.userId,
-            refundStatus === "REFUND_GRANTED" ? "Refund Approved" : "Refund Update",
-            `Update on your issue: ${refundStatus}. ${resolutionNotes || ""}`,
-            { type: "REFUND", refundId: req.params.id, orderId: rData.orderId }
-          ).catch(() => {});
+        let effectiveNotes = resolutionNotes || "";
+        if (effectiveType === 'REDELIVER' && (!effectiveNotes || effectiveNotes.includes('refund of ₹'))) {
+          effectiveNotes = `We apologize for the inconvenience with order #${rData.orderNo || ''}. We have arranged a replacement redelivery for your reported item(s). Our delivery partner is bringing the replacement shortly.`;
         }
 
-        return res.json({ id: req.params.id, status: status || ISSUE_STATUS.RESOLVED, resolutionNotes });
+        const refundUpdates = {
+          status: refundStatus,
+          resolutionType: effectiveType,
+          rejectReason: effectiveType === 'REJECT' ? effectiveNotes : null,
+          resolutionNotes: effectiveNotes,
+          adminMessage: effectiveNotes,
+          resolvedAt: now,
+          updatedAt: now,
+        };
+
+        if (effectiveType === 'REDELIVER') {
+          refundUpdates.timeline = [
+            { step: "ISSUE_REPORTED", label: "Issue Reported", at: rData.createdAt || now, completed: true },
+            { step: "REDELIVERY_SCHEDULED", label: "Redelivery Scheduled", at: now, completed: true, note: effectiveNotes },
+            { step: "OUT_FOR_DELIVERY", label: "Replacement In Progress", at: null, completed: false, current: true, note: "Delivery partner will bring replacement items" },
+          ];
+        }
+
+        await refundRef.update(refundUpdates);
+
+        if (rData.userId) {
+          const notifTitle = effectiveType === 'REDELIVER'
+            ? "Redelivery Arranged"
+            : refundStatus === "REFUND_GRANTED"
+            ? "Refund Approved"
+            : "Issue Claim Update";
+          const notifBody = effectiveNotes || (effectiveType === 'REDELIVER'
+            ? `We have arranged a redelivery for your order #${rData.orderNo || ''}.`
+            : refundStatus === "REFUND_GRANTED"
+            ? `Your refund for order #${rData.orderNo || ''} has been approved.`
+            : `Your claim for order #${rData.orderNo || ''} was reviewed.`);
+
+          notifyUser(rData.userId, notifTitle, notifBody, {
+            type: effectiveType === 'REDELIVER' ? "ISSUE_REDELIVER" : "REFUND",
+            refundId: req.params.id,
+            orderId: rData.orderId,
+            orderNo: String(rData.orderNo || ''),
+            resolutionType: effectiveType,
+            status: refundStatus,
+          }).catch(() => {});
+        }
+
+        try {
+          const { invalidateReadsCache } = require("./reads.routes");
+          invalidateReadsCache("issues");
+          invalidateReadsCache("refunds");
+          invalidateReadsCache("orders");
+          if (rData.userId) invalidateReadsCache(rData.userId);
+        } catch (_) {}
+
+        return res.json({ id: req.params.id, status: status || ISSUE_STATUS.RESOLVED, resolutionNotes: effectiveNotes, resolutionType: effectiveType });
       }
       return res.status(404).json({ error: "Issue not found" });
     }
 
     const current = doc.data();
+    const effectiveResolutionType = resolutionType || current.resolutionType || (status === 'REJECTED' ? 'REJECT' : 'REFUND');
+
+    let effectiveNotes = resolutionNotes || current.resolutionNotes || "";
+    if (effectiveResolutionType === 'REDELIVER' && (!effectiveNotes || effectiveNotes.includes('refund of ₹'))) {
+      effectiveNotes = `We apologize for the inconvenience with order #${current.orderNo || ''}. We have arranged a replacement redelivery for your reported item(s). Our delivery partner is bringing the replacement shortly.`;
+    }
+
     const updated = {
-      status: status || ISSUE_STATUS.RESOLVED,
-      resolutionNotes: resolutionNotes || "",
+      status: status || (effectiveResolutionType === 'REJECT' ? ISSUE_STATUS.REJECTED : ISSUE_STATUS.RESOLVED),
+      resolutionType: effectiveResolutionType,
+      resolutionNotes: effectiveNotes,
       resolvedAt: now,
       updatedAt: now,
     };
 
     await ref.update(updated);
 
-    // If there is an associated refund, sync its status as well
+    // If there is an associated refund, sync its status according to resolution type
     try {
+      const targetRefundStatus = effectiveResolutionType === 'REJECT' || updated.status === ISSUE_STATUS.REJECTED
+        ? "REJECTED"
+        : effectiveResolutionType === 'REDELIVER'
+        ? "RESOLVED_REDELIVER"
+        : "REFUND_GRANTED";
+
+      const refundUpdates = {
+        status: targetRefundStatus,
+        resolutionType: effectiveResolutionType,
+        rejectReason: effectiveResolutionType === 'REJECT' ? effectiveNotes : null,
+        resolutionNotes: effectiveNotes,
+        adminMessage: effectiveNotes,
+        resolvedAt: now,
+        updatedAt: now,
+      };
+
+      if (effectiveResolutionType === 'REDELIVER') {
+        refundUpdates.timeline = [
+          { step: "ISSUE_REPORTED", label: "Issue Reported", at: current.createdAt || now, completed: true },
+          { step: "REDELIVERY_SCHEDULED", label: "Redelivery Scheduled", at: now, completed: true, note: effectiveNotes },
+          { step: "OUT_FOR_DELIVERY", label: "Replacement In Progress", at: null, completed: false, current: true, note: "Delivery partner will bring replacement items" },
+        ];
+      }
+
       if (current.refundId) {
-        await db().collection(COLLECTIONS.REFUNDS).doc(current.refundId).update({
-          status: status === ISSUE_STATUS.RESOLVED ? "REFUND_GRANTED" : "REJECTED",
-          rejectReason: resolutionNotes || null,
-          resolutionNotes: resolutionNotes || null,
-          adminMessage: resolutionNotes || null,
-          resolvedAt: now,
-          updatedAt: now,
-        });
+        await db().collection(COLLECTIONS.REFUNDS).doc(current.refundId).update(refundUpdates);
       } else if (current.orderId) {
         const refSnap = await db().collection(COLLECTIONS.REFUNDS).where("orderId", "==", current.orderId).limit(1).get();
         if (!refSnap.empty) {
-          await refSnap.docs[0].ref.update({
-            status: status === ISSUE_STATUS.RESOLVED ? "REFUND_GRANTED" : "REJECTED",
-            rejectReason: resolutionNotes || null,
-            resolutionNotes: resolutionNotes || null,
-            adminMessage: resolutionNotes || null,
-            resolvedAt: now,
-            updatedAt: now,
-          });
+          await refSnap.docs[0].ref.update(refundUpdates);
         }
       }
     } catch (err) {
       console.error("Failed to sync refund on issue resolution:", err);
     }
 
-    // Notify user
+    // Notify user dynamically based on REDELIVER vs REFUND vs REJECT
     if (current.userId) {
+      const notifTitle = effectiveResolutionType === 'REDELIVER'
+        ? "Redelivery Arranged"
+        : updated.status === ISSUE_STATUS.RESOLVED
+        ? "Refund Approved"
+        : "Issue Claim Update";
+      const notifBody = effectiveNotes || (effectiveResolutionType === 'REDELIVER'
+        ? `We have arranged a redelivery for your order #${current.orderNo || ''}.`
+        : updated.status === ISSUE_STATUS.RESOLVED
+        ? `Your refund for order #${current.orderNo || ''} has been approved.`
+        : `Your claim for order #${current.orderNo || ''} was reviewed.`);
+
       notifyUser(
         current.userId,
-        status === ISSUE_STATUS.RESOLVED ? "Issue Resolved" : "Issue Update",
-        `Update on your reported issue for order #${current.orderNo}: ${status}. ${resolutionNotes || ""}`,
-        { type: "ISSUE", issueId: req.params.id, orderId: current.orderId }
+        notifTitle,
+        notifBody,
+        {
+          type: effectiveResolutionType === 'REDELIVER' ? "ISSUE_REDELIVER" : "REFUND",
+          issueId: req.params.id,
+          orderId: current.orderId,
+          orderNo: String(current.orderNo || ''),
+          refundId: current.refundId || '',
+          resolutionType: effectiveResolutionType,
+          status: updated.status,
+        }
       ).catch(() => {});
     }
+
+    try {
+      const { invalidateReadsCache } = require("./reads.routes");
+      invalidateReadsCache("issues");
+      invalidateReadsCache("refunds");
+      invalidateReadsCache("orders");
+      if (current.userId) invalidateReadsCache(current.userId);
+    } catch (_) {}
 
     res.json({ id: req.params.id, ...current, ...updated });
   })
@@ -486,20 +590,30 @@ router.post(
       const { invalidateReadsCache } = require("./reads.routes");
       invalidateReadsCache("issues");
       invalidateReadsCache("refunds");
+      invalidateReadsCache("orders");
       if (userId) invalidateReadsCache(userId);
     } catch (_) {}
+
+    const replyResolutionType = doc.exists
+      ? doc.data()?.resolutionType
+      : (refundDoc?.exists ? refundDoc.data()?.resolutionType : null);
 
     if (userId) {
       await notifyUser(
         userId,
-        "Reply from MS Traders",
+        replyResolutionType === 'REDELIVER' || cleanReply.toLowerCase().includes('redeliver')
+          ? "Redelivery Update from MS Traders"
+          : "Reply from MS Traders",
         cleanReply,
         {
-          type: "ISSUE_REPLY",
+          type: replyResolutionType === 'REDELIVER' || cleanReply.toLowerCase().includes('redeliver')
+            ? "ISSUE_REDELIVER"
+            : "ISSUE_REPLY",
           issueId: req.params.id,
           orderId,
           orderNo: String(orderNo),
           refundId,
+          resolutionType: replyResolutionType,
         }
       );
     }
