@@ -3,7 +3,7 @@ const multer = require("multer");
 const { asyncHandler } = require("../middleware/error");
 const { authenticate, requireRole } = require("../middleware/auth");
 const { db } = require("../config/firebase");
-const { COLLECTIONS, ROLES, ISSUE_STATUS, ORDER_STATUS } = require("../config/constants");
+const { COLLECTIONS, ROLES, ISSUE_STATUS, ORDER_STATUS, PAYMENT_STATUS } = require("../config/constants");
 const { notifyUser } = require("../services/notificationService");
 const { upload: uploadToCloud } = require("../services/storageService");
 
@@ -282,6 +282,202 @@ router.get(
   })
 );
 
+async function createRedeliveryOrder(itemData, targetId, adminNotes) {
+  if (itemData.redeliveryOrderId) {
+    return itemData.redeliveryOrderId;
+  }
+
+  let origOrderDoc = null;
+  let origOrder = null;
+  if (itemData.orderId) {
+    origOrderDoc = await db().collection(COLLECTIONS.ORDERS).doc(itemData.orderId).get();
+    if (origOrderDoc.exists) origOrder = origOrderDoc.data();
+  }
+  if (!origOrder && itemData.orderNo) {
+    const snap = await db()
+      .collection(COLLECTIONS.ORDERS)
+      .where("orderNo", "==", Number(itemData.orderNo) || itemData.orderNo)
+      .limit(1)
+      .get();
+    if (!snap.empty) {
+      origOrderDoc = snap.docs[0];
+      origOrder = origOrderDoc.data();
+    }
+  }
+
+  const now = Date.now();
+
+  let orderNo = 1052;
+  try {
+    const configRef = db().collection(COLLECTIONS.SETTINGS || "settings").doc("system");
+    await db().runTransaction(async (tx) => {
+      const cfgSnap = await tx.get(configRef);
+      const curSeq = (cfgSnap.exists && cfgSnap.data().orderSeq) ? cfgSnap.data().orderSeq : 1050;
+      orderNo = curSeq + 1;
+      tx.set(configRef, { orderSeq: orderNo }, { merge: true });
+    });
+  } catch (e) {
+    orderNo = Math.floor(1000 + (now % 9000));
+  }
+
+  let items = [];
+  if (Array.isArray(itemData.affectedItems) && itemData.affectedItems.length > 0) {
+    items = itemData.affectedItems.map((ai) => {
+      const origMatch = origOrder?.items?.find((oi) => oi.name === ai.name || oi.productId === ai.productId);
+      const itemPrice = Number(ai.price ?? origMatch?.price ?? 0);
+      return {
+        productId: ai.productId || origMatch?.productId || `rep-${Date.now()}`,
+        variantId: ai.variantId || origMatch?.variantId || "default",
+        name: ai.name || origMatch?.name || "Replacement Item",
+        variantLabel: ai.unit || ai.variantLabel || origMatch?.variantLabel || "1 Unit",
+        price: itemPrice,
+        unitPrice: itemPrice,
+        originalPrice: itemPrice,
+        isFreeReplacement: true,
+        qty: ai.qty || 1,
+        images: origMatch?.images || [],
+        image: origMatch?.image || null,
+      };
+    });
+  } else if (Array.isArray(origOrder?.items) && origOrder.items.length > 0) {
+    items = origOrder.items.map((oi) => {
+      const itemPrice = Number(oi.price || 0);
+      return {
+        ...oi,
+        price: itemPrice,
+        unitPrice: itemPrice,
+        originalPrice: itemPrice,
+        isFreeReplacement: true,
+      };
+    });
+  } else {
+    items = [{
+      productId: "rep-item",
+      variantId: "default",
+      name: "Replacement Item",
+      variantLabel: "1 Unit",
+      price: 0,
+      unitPrice: 0,
+      originalPrice: 0,
+      isFreeReplacement: true,
+      qty: 1,
+    }];
+  }
+
+  const itemsTotalValue = items.reduce((sum, item) => sum + ((Number(item.price) || 0) * (Number(item.qty) || 1)), 0);
+
+  const orderRef = db().collection(COLLECTIONS.ORDERS).doc();
+  const redeliveryOrder = {
+    orderNo,
+    userId: itemData.userId || origOrder?.userId,
+    userName: itemData.userName || origOrder?.userName || "Customer",
+    userEmail: itemData.userEmail || origOrder?.userEmail || "",
+    userPhone: itemData.userPhone || origOrder?.userPhone || "",
+    items,
+    couponCode: null,
+    couponId: null,
+    addressSnapshot: itemData.address || origOrder?.addressSnapshot || origOrder?.address || null,
+    deliveryMode: "ON_DEMAND",
+    notes: adminNotes || `Free replacement redelivery for #${targetId} (Original Order #${itemData.orderNo || origOrder?.orderNo || ''})`,
+    paymentMethod: "FREE_REPLACEMENT",
+    paymentStatus: PAYMENT_STATUS.PAID,
+    itemsTotalValue,
+    replacementDiscount: itemsTotalValue,
+    subtotal: itemsTotalValue,
+    tax: 0,
+    deliveryCharge: 0,
+    discount: itemsTotalValue,
+    total: 0,
+    distanceKm: origOrder?.distanceKm || 1.5,
+    status: ORDER_STATUS.PLACED,
+    redeliveryStatus: "AWAITING_CUSTOMER_CONFIRMATION",
+    customerAvailability: {
+      status: "AWAITING",
+      notifiedAt: now,
+      confirmedAt: null,
+      rescheduledSlot: null,
+      declinedReason: null,
+      declinedAt: null,
+      remindedAt: null,
+    },
+    statusHistory: [
+      {
+        status: ORDER_STATUS.PLACED,
+        redeliveryStatus: "AWAITING_CUSTOMER_CONFIRMATION",
+        at: now,
+        note: "Free replacement request created — awaiting customer availability confirmation",
+      },
+    ],
+    assignedPartnerId: null,
+    isRedelivery: true,
+    originalOrderId: origOrderDoc?.id || itemData.orderId || null,
+    originalOrderNo: origOrder?.orderNo || itemData.orderNo || null,
+    issueId: targetId,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  await orderRef.set(redeliveryOrder);
+
+  try {
+    const { notifyUser } = require("../services/notificationService");
+    const origNo = origOrder?.orderNo || itemData.orderNo || '';
+    if (redeliveryOrder.userId) {
+      await notifyUser(
+        redeliveryOrder.userId,
+        `Replacement Arranged · Order #${origNo}`,
+        `We have arranged a free replacement for your item(s). Are you available to receive it now? Please open the app to confirm or pick a time slot.`,
+        {
+          type: "REDELIVERY_CONFIRMATION",
+          orderId: orderRef.id,
+          orderNo: redeliveryOrder.orderNo,
+          originalOrderNo: origNo,
+        }
+      );
+    }
+  } catch (e) {
+    console.warn("Could not notify customer of replacement:", e.message);
+  }
+
+  try {
+    if (itemData.refundId) {
+      await db().collection(COLLECTIONS.REFUNDS).doc(itemData.refundId).update({
+        redeliveryOrderId: orderRef.id,
+        redeliveryOrderNo: orderNo,
+        updatedAt: now,
+      });
+    }
+    const issueRef = db().collection(COLLECTIONS.ISSUES).doc(targetId);
+    const iSnap = await issueRef.get();
+    if (iSnap.exists) {
+      await issueRef.update({
+        redeliveryOrderId: orderRef.id,
+        redeliveryOrderNo: orderNo,
+        updatedAt: now,
+      });
+    }
+  } catch (e) {}
+
+  try {
+    const { invalidateReadsCache } = require("./reads.routes");
+    const { invalidateOrderMemoryCache } = require("./orders.routes");
+    invalidateReadsCache(orderRef.id);
+    if (redeliveryOrder.userId) {
+      invalidateReadsCache(redeliveryOrder.userId);
+      invalidateOrderMemoryCache(orderRef.id, redeliveryOrder.userId);
+    }
+  } catch (e) {}
+
+  try {
+    const { notifyAdminsNewOrder } = require("../services/notificationService");
+    await notifyAdminsNewOrder({ ...redeliveryOrder, id: orderRef.id });
+  } catch (e) {
+    console.warn("Could not notify admin of redelivery order:", e.message);
+  }
+
+  return orderRef.id;
+}
+
 // PATCH /api/issues/:id/status - Admin resolves or rejects an issue
 router.patch(
   "/:id/status",
@@ -337,6 +533,7 @@ router.patch(
         };
 
         if (effectiveType === 'REDELIVER') {
+          await createRedeliveryOrder(rData, req.params.id, effectiveNotes);
           refundUpdates.timeline = [
             { step: "ISSUE_REPORTED", label: "Issue Reported", at: rData.createdAt || now, completed: true },
             { step: "REDELIVERY_SCHEDULED", label: "Redelivery Scheduled", at: now, completed: true, note: effectiveNotes },
@@ -418,6 +615,7 @@ router.patch(
       };
 
       if (effectiveResolutionType === 'REDELIVER') {
+        await createRedeliveryOrder(current, req.params.id, effectiveNotes);
         refundUpdates.timeline = [
           { step: "ISSUE_REPORTED", label: "Issue Reported", at: current.createdAt || now, completed: true },
           { step: "REDELIVERY_SCHEDULED", label: "Redelivery Scheduled", at: now, completed: true, note: effectiveNotes },

@@ -4,7 +4,7 @@ const { authenticate, requireRole } = require("../middleware/auth");
 const { DeliveryPartners, Orders } = require("../models");
 const { ROLES, COLLECTIONS, ORDER_STATUS } = require("../config/constants");
 const { db } = require("../config/firebase");
-const { haversineKm, validCoordinates } = require("../config/deliveryArea");
+const { haversineKm, validCoordinates, STORE_LOCATION } = require("../config/deliveryArea");
 
 const router = express.Router();
 
@@ -186,13 +186,17 @@ router.patch(
               ...(oData.status === ORDER_STATUS.OUT_FOR_DELIVERY && validCoordinates(Number((oData.addressSnapshot || oData.address)?.lat ?? (oData.addressSnapshot || oData.address)?.latitude), Number((oData.addressSnapshot || oData.address)?.lng ?? (oData.addressSnapshot || oData.address)?.longitude))
                 ? (() => {
                     const address = oData.addressSnapshot || oData.address;
-                    const remainingKm = haversineKm(lat, lng, Number(address.lat ?? address.latitude), Number(address.lng ?? address.longitude)) * 1.3;
+                    const dLat = Number(address.lat ?? address.latitude);
+                    const dLng = Number(address.lng ?? address.longitude);
+                    const storeToDest = haversineKm(STORE_LOCATION.lat, STORE_LOCATION.lng, dLat, dLng) || Number(oData.distanceKm) || 2;
+                    const rawRemaining = haversineKm(lat, lng, dLat, dLng);
+                    const effectiveKm = (rawRemaining !== null && rawRemaining <= 6) ? rawRemaining * 1.3 : storeToDest * 1.3;
                     // GPS speed is the live traffic signal. Ignore stationary/noisy readings;
                     // the route estimate remains bounded for implausible coordinates/speeds.
                     const speedKmph = Number(speed) > 0.3 && Number(speed) < 12
                       ? Math.max(4, Math.min(40, Number(speed) * 3.6))
                       : 20;
-                    const minutes = Math.max(2, Math.min(180, Math.ceil(remainingKm / speedKmph * 60)));
+                    const minutes = Math.max(3, Math.min(25, Math.ceil(effectiveKm / speedKmph * 60)));
                     const delayMinutes = Math.max(0, Number(oData.deliveryDelayMinutes ?? oData.deliveryDelay?.totalDelayMinutes) || 0);
                     return { estimatedDeliveryAt: now + (minutes + delayMinutes) * 60000 };
                   })()

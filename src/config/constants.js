@@ -44,9 +44,12 @@ const ORDER_STATUS_FLOW = [
   ORDER_STATUS.DELIVERED,
 ];
 
-// UPI_MANUAL = shop UPI ID / QR / GPay deep-link, confirmed manually by the shop (no gateway).
-// RAZORPAY is reserved for a future gateway integration; no provider is wired for it yet.
-const PAYMENT_METHOD = { COD: "COD", UPI_MANUAL: "UPI_MANUAL", RAZORPAY: "RAZORPAY" };
+const PAYMENT_METHOD = {
+  COD: "COD",
+  UPI_MANUAL: "UPI_MANUAL",
+  RAZORPAY: "RAZORPAY",
+  FREE_REPLACEMENT: "FREE_REPLACEMENT",
+};
 // AWAITING_CONFIRMATION = customer tapped "I've Paid"; shop/admin still needs to verify and mark PAID.
 const PAYMENT_STATUS = { PENDING: "PENDING", AWAITING_CONFIRMATION: "AWAITING_CONFIRMATION", PAID: "PAID", FAILED: "FAILED" };
 

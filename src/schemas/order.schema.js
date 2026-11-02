@@ -28,7 +28,7 @@ const orderItemSchema = Joi.object({
   variantLabel: Joi.string().required(),
   qty: Joi.number().integer().min(1).required(),
   price: Joi.number().min(0).required(), // unit price charged
-});
+}).unknown(true);
 
 const addressSnapshotSchema = Joi.object({
   houseNo: Joi.string().required(),
@@ -42,7 +42,7 @@ const addressSnapshotSchema = Joi.object({
 const statusEventSchema = Joi.object({
   status: Joi.string().valid(...Object.values(ORDER_STATUS), "PACKING", "PENDING", "READY_FOR_DELIVERY").required(),
   at: Joi.number().required(),
-});
+}).unknown(true);
 
 const orderSchema = Joi.object({
   orderNo: Joi.number().integer().required(), // human friendly #1001
@@ -108,9 +108,23 @@ const orderSchema = Joi.object({
   }).unknown(true).allow(null),
   lastSyncedAt: Joi.number().allow(null),
   confirmedAt: Joi.number().allow(null),
+  isRedelivery: Joi.boolean().allow(null),
+  redeliveryStatus: Joi.string().allow("", null),
+  originalOrderId: Joi.string().allow("", null),
+  originalOrderNo: Joi.any().allow(null),
+  itemsTotalValue: Joi.number().allow(null),
+  replacementDiscount: Joi.number().allow(null),
+  rescheduledSlot: Joi.string().allow("", null),
+  customerAvailability: Joi.object().unknown(true).allow(null),
+  reminderSentAt: Joi.number().allow(null),
+  cancelReason: Joi.string().allow("", null),
+  cancellationReason: Joi.string().allow("", null),
+  hasRedelivery: Joi.boolean().allow(null),
+  replacementOrderId: Joi.string().allow("", null),
+  replacementOrderNo: Joi.any().allow(null),
   createdAt: Joi.number().required(),
   updatedAt: Joi.number().required(),
-});
+}).unknown(true);
 
 // offers/{offerId}
 const offerSchema = Joi.object({

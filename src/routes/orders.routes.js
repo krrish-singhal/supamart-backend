@@ -6,7 +6,7 @@ const { createPayment } = require("../services/paymentService");
 const { sendOwnerWhatsApp, notifyAdminsNewOrder, notifyUser } = require("../services/notificationService");
 const { Orders, DeliveryPartners, Users } = require("../models");
 const { db, authAdmin } = require("../config/firebase");
-const { ROLES, ORDER_STATUS, COLLECTIONS, REFUND_STATUS } = require("../config/constants");
+const { ROLES, ORDER_STATUS, COLLECTIONS, REFUND_STATUS, PAYMENT_STATUS, PAYMENT_METHOD } = require("../config/constants");
 const { storeStatus } = require("../config/storeHours");
 const { invalidateReadsCache, onInvalidateReadsCache } = require("./reads.routes");
 const { enqueueDeliveryDelayEmail, processDeliveryDelayEmail } = require("../services/deliveryDelayEmailQueue");
@@ -33,8 +33,16 @@ function invalidateOrderMemoryCache(pathSubstring) {
   for (const key of orderDetailCache.keys()) {
     if (key.includes(clean)) orderDetailCache.delete(key);
   }
+  let clearedUser = false;
   for (const key of userOrdersCache.keys()) {
-    if (key.includes(clean)) userOrdersCache.delete(key);
+    if (key.includes(clean)) {
+      userOrdersCache.delete(key);
+      clearedUser = true;
+    }
+  }
+  if (!clearedUser) {
+    // If pathSubstring is an orderId, purge userOrdersCache so /mine returns live state
+    userOrdersCache.clear();
   }
   buyAgainCache.delete(clean);
 }
@@ -94,7 +102,7 @@ router.post(
         const status = storeStatus(Date.now(), cfg);
         if (!status.isOpen) {
           return res.status(422).json({
-            error: status.label || "Store is currently closed for orders. Please try again during store hours.",
+            error: status.label || "Store is currently closed for orders. Please try again when the store opens.",
             code: "STORE_CLOSED",
           });
         }
@@ -207,6 +215,35 @@ router.get(
       });
       if (unconfirmed) {
         return res.json({ order: { id: unconfirmed.id, ...unconfirmed.data() } });
+      }
+    }
+
+    res.json({ order: null });
+  })
+);
+
+// GET /api/orders/pending-redelivery (fetch any active redelivery awaiting customer availability confirmation)
+router.get(
+  "/pending-redelivery",
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const snap = await db()
+      .collection(COLLECTIONS.ORDERS)
+      .where("userId", "==", req.user.uid)
+      .where("isRedelivery", "==", true)
+      .limit(10)
+      .get();
+
+    if (!snap.empty) {
+      const pending = snap.docs.find((d) => {
+        const data = d.data();
+        return (
+          data.status !== ORDER_STATUS.CANCELLED &&
+          data.redeliveryStatus === "AWAITING_CUSTOMER_CONFIRMATION"
+        );
+      });
+      if (pending) {
+        return res.json({ order: { id: pending.id, ...pending.data() } });
       }
     }
 
@@ -655,6 +692,30 @@ router.patch(
     }
     // partnerId can be empty string/null to unassign
     const partnerId = req.body.partnerId || null;
+    if (
+      partnerId &&
+      order.paymentMethod &&
+      order.paymentMethod !== PAYMENT_METHOD.COD &&
+      order.paymentMethod !== "FREE_REPLACEMENT" &&
+      order.paymentStatus !== PAYMENT_STATUS.PAID
+    ) {
+      return res.status(422).json({
+        error: "Payment must be verified and approved first before assigning a delivery partner. Please verify payment first.",
+        code: "PAYMENT_NOT_VERIFIED",
+      });
+    }
+    if (partnerId && order.isRedelivery && order.redeliveryStatus === "AWAITING_CUSTOMER_CONFIRMATION") {
+      return res.status(422).json({
+        error: "Customer has not confirmed availability for this replacement yet. Please wait for customer confirmation or send a reminder before assigning a partner.",
+        code: "AWAITING_CUSTOMER_CONFIRMATION",
+      });
+    }
+    if (partnerId && order.isRedelivery && order.redeliveryStatus === "DECLINED") {
+      return res.status(422).json({
+        error: "Customer declined this redelivery. Cannot assign delivery partner.",
+        code: "REDELIVERY_DECLINED",
+      });
+    }
     let partnerData = null;
     if (partnerId) {
       const p = await DeliveryPartners.findById(partnerId);
@@ -688,6 +749,7 @@ router.patch(
     invalidateReadsCache(order.id);
     if (order.userId) invalidateReadsCache(order.userId);
     invalidateReadsCache("orders");
+    invalidateOrderMemoryCache(order.id, order.userId);
 
     if (partnerId) {
       notifyUser(
@@ -750,14 +812,16 @@ router.patch(
         const dLat = Number(address?.lat ?? address?.latitude);
         const dLng = Number(address?.lng ?? address?.longitude);
         if (Number.isFinite(pLat) && Number.isFinite(pLng) && Number.isFinite(dLat) && Number.isFinite(dLng) && (pLat !== 0 || pLng !== 0)) {
-          const { haversineKm } = require("../config/deliveryArea");
-          const remainingKm = haversineKm(pLat, pLng, dLat, dLng) * 1.3;
-          deliveryMinutes = Math.max(2, Math.min(180, Math.ceil(remainingKm / 20 * 60)));
+          const { haversineKm, STORE_LOCATION } = require("../config/deliveryArea");
+          const storeToDest = haversineKm(STORE_LOCATION.lat, STORE_LOCATION.lng, dLat, dLng) || Number(order.distanceKm) || 2;
+          const rawRemaining = haversineKm(pLat, pLng, dLat, dLng);
+          const effectiveKm = (rawRemaining !== null && rawRemaining <= 6) ? rawRemaining * 1.3 : storeToDest * 1.3;
+          deliveryMinutes = Math.max(3, Math.min(25, Math.ceil(effectiveKm / 20 * 60)));
         }
       } catch (_) {}
     }
     if (!deliveryMinutes && Number.isFinite(Number(order.distanceKm)) && Number(order.distanceKm) > 0) {
-      deliveryMinutes = Math.max(2, Math.min(180, Math.ceil(Number(order.distanceKm) * 1.3 / 20 * 60)));
+      deliveryMinutes = Math.max(3, Math.min(25, Math.ceil(Number(order.distanceKm) * 1.3 / 20 * 60)));
     }
     if (!deliveryMinutes) deliveryMinutes = 10;
     const updatePayload = {
@@ -815,6 +879,10 @@ router.patch(
     const rejectedPartnerId = order.assignedPartnerId;
     const rejectedPartnerName = order.deliveryBoyName || order.deliveryPartner?.name || "";
     const updatePayload = {
+      assignedPartnerId: null,
+      deliveryPartner: null,
+      deliveryBoyName: null,
+      deliveryBoyPhone: null,
       deliveryAcceptanceStatus: "REJECTED",
       rejectedByPartnerId: rejectedPartnerId,
       rejectedByPartnerName: rejectedPartnerName,
@@ -830,6 +898,9 @@ router.patch(
     };
     const updated = await Orders.update(order.id, updatePayload);
     invalidateReadsCache(order.id);
+    if (order.userId) invalidateReadsCache(order.userId);
+    invalidateReadsCache("orders");
+    invalidateOrderMemoryCache(order.id, order.userId);
     res.json(updated);
   })
 );
@@ -989,4 +1060,380 @@ router.patch(
   })
 );
 
+// PATCH /api/orders/:id/redelivery/respond (customer confirms availability, reschedules, or declines)
+router.patch(
+  "/:id/redelivery/respond",
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const { action, slot, reason } = req.body;
+    if (!["CONFIRM", "RESCHEDULE", "DECLINE"].includes(action)) {
+      return res.status(422).json({ error: "Invalid action. Must be CONFIRM, RESCHEDULE, or DECLINE" });
+    }
+    const order = await findOrderByIdOrOrderNo(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (!order.isRedelivery) {
+      return res.status(422).json({ error: "Order is not a redelivery order" });
+    }
+    if (order.userId && req.user.role !== ROLES.ADMIN && req.user.uid !== order.userId) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const now = Date.now();
+    let updates = { updatedAt: now };
+
+    if (action === "CONFIRM") {
+      updates = {
+        ...updates,
+        redeliveryStatus: "CONFIRMED",
+        status: ORDER_STATUS.ORDER_ACCEPTED,
+        "customerAvailability.status": "CONFIRMED",
+        "customerAvailability.confirmedAt": now,
+        statusHistory: [
+          ...(order.statusHistory || []),
+          {
+            status: ORDER_STATUS.ORDER_ACCEPTED,
+            redeliveryStatus: "CONFIRMED",
+            at: now,
+            note: "Customer confirmed availability for immediate dispatch",
+          },
+        ],
+      };
+
+      // Notify admin
+      const adminAlertRef = db().collection(COLLECTIONS.ADMIN_ALERTS || "adminAlerts").doc();
+      await adminAlertRef.set({
+        type: "REDELIVERY_CONFIRMED",
+        orderId: order.id,
+        orderNo: order.orderNo,
+        originalOrderNo: order.originalOrderNo,
+        customerName: order.userName || "Customer",
+        customerPhone: order.userPhone || "",
+        message: `Customer confirmed availability for replacement order #${order.orderNo} (Original #${order.originalOrderNo}). Ready for dispatch!`,
+        createdAt: now,
+        read: false,
+      });
+
+      notifyUser(
+        order.userId,
+        "Replacement Delivery Confirmed",
+        `Your replacement delivery #${order.orderNo} is confirmed and will be dispatched to your address shortly.`,
+        { type: "ORDER_UPDATE", orderId: order.id }
+      ).catch(() => {});
+    } else if (action === "RESCHEDULE") {
+      const scheduledSlot = slot || "Later today";
+      updates = {
+        ...updates,
+        redeliveryStatus: "RESCHEDULED",
+        rescheduledSlot: scheduledSlot,
+        "customerAvailability.status": "RESCHEDULED",
+        "customerAvailability.rescheduledSlot": scheduledSlot,
+        "customerAvailability.rescheduledAt": now,
+        notes: `${order.notes || ""} | Rescheduled by customer to: ${scheduledSlot}`.trim(),
+        statusHistory: [
+          ...(order.statusHistory || []),
+          {
+            status: order.status || ORDER_STATUS.PLACED,
+            redeliveryStatus: "RESCHEDULED",
+            at: now,
+            note: `Customer requested replacement delivery at: ${scheduledSlot}`,
+          },
+        ],
+      };
+
+      const adminAlertRef = db().collection(COLLECTIONS.ADMIN_ALERTS || "adminAlerts").doc();
+      await adminAlertRef.set({
+        type: "REDELIVERY_RESCHEDULED",
+        orderId: order.id,
+        orderNo: order.orderNo,
+        originalOrderNo: order.originalOrderNo,
+        customerName: order.userName || "Customer",
+        customerPhone: order.userPhone || "",
+        rescheduledSlot: scheduledSlot,
+        message: `Customer requested redelivery for replacement #${order.orderNo} (Original #${order.originalOrderNo}) at: ${scheduledSlot}`,
+        createdAt: now,
+        read: false,
+      });
+
+      notifyUser(
+        order.userId,
+        "Replacement Delivery Rescheduled",
+        `Your replacement delivery is scheduled for ${scheduledSlot}. We'll notify you when it's out for delivery.`,
+        { type: "ORDER_UPDATE", orderId: order.id }
+      ).catch(() => {});
+    } else if (action === "DECLINE") {
+      const declineReason = reason || "Customer declined replacement";
+      updates = {
+        ...updates,
+        redeliveryStatus: "DECLINED",
+        status: ORDER_STATUS.CANCELLED,
+        cancelReason: `Redelivery Declined: ${declineReason}`,
+        cancellationReason: `Redelivery Declined: ${declineReason}`,
+        "customerAvailability.status": "DECLINED",
+        "customerAvailability.declinedReason": declineReason,
+        "customerAvailability.declinedAt": now,
+        statusHistory: [
+          ...(order.statusHistory || []),
+          {
+            status: ORDER_STATUS.CANCELLED,
+            redeliveryStatus: "DECLINED",
+            at: now,
+            note: `Customer declined redelivery: ${declineReason}`,
+          },
+        ],
+      };
+
+      const adminAlertRef = db().collection(COLLECTIONS.ADMIN_ALERTS || "adminAlerts").doc();
+      await adminAlertRef.set({
+        type: "REDELIVERY_DECLINED",
+        orderId: order.id,
+        orderNo: order.orderNo,
+        originalOrderNo: order.originalOrderNo,
+        customerName: order.userName || "Customer",
+        customerPhone: order.userPhone || "",
+        reason: declineReason,
+        message: `Customer declined redelivery for #${order.orderNo} (Original #${order.originalOrderNo}). Reason: ${declineReason}. Please follow up for refund/action.`,
+        createdAt: now,
+        read: false,
+      });
+
+      notifyUser(
+        order.userId,
+        "Replacement Request Closed",
+        `You have declined the replacement for order #${order.originalOrderNo}. Our team will follow up with you.`,
+        { type: "ORDER_UPDATE", orderId: order.id }
+      ).catch(() => {});
+    }
+
+    await Orders.update(order.id, updates);
+    invalidateReadsCache(order.id);
+    if (order.userId) invalidateReadsCache(order.userId);
+    invalidateReadsCache("orders");
+    invalidateOrderMemoryCache(order.id, order.userId);
+
+    const updated = await findOrderByIdOrOrderNo(order.id);
+    res.json(updated);
+  })
+);
+
+// POST /api/orders/:id/redelivery/reminder (admin sends reminder to customer)
+router.post(
+  "/:id/redelivery/reminder",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const order = await findOrderByIdOrOrderNo(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (!order.isRedelivery) {
+      return res.status(422).json({ error: "Order is not a redelivery order" });
+    }
+    const now = Date.now();
+    await Orders.update(order.id, {
+      "customerAvailability.remindedAt": now,
+      "customerAvailability.reminderCount": (order.customerAvailability?.reminderCount || 0) + 1,
+      updatedAt: now,
+    });
+
+    if (order.userId) {
+      await notifyUser(
+        order.userId,
+        `Action Required: Replacement for Order #${order.originalOrderNo || order.orderNo}`,
+        `Your replacement delivery is waiting for your confirmation. Please open the app and confirm whether you are available now or pick a time slot.`,
+        {
+          type: "REDELIVERY_CONFIRMATION",
+          orderId: order.id,
+          orderNo: order.orderNo,
+          originalOrderNo: order.originalOrderNo,
+        }
+      );
+    }
+    invalidateReadsCache(order.id);
+    if (order.userId) invalidateReadsCache(order.userId);
+    invalidateReadsCache("orders");
+    invalidateOrderMemoryCache(order.id, order.userId);
+
+    res.json({ success: true, remindedAt: now });
+  })
+);
+
+// POST /api/orders/:id/redelivery (admin initiates free replacement redelivery linked to original order)
+router.post(
+  "/:id/redelivery",
+  authenticate,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    const origOrder = await findOrderByIdOrOrderNo(req.params.id);
+    if (!origOrder) return res.status(404).json({ error: "Original order not found" });
+
+    const now = Date.now();
+    const { reason, adminNotes, items: customItems, address } = req.body || {};
+
+    let orderNo = 1052;
+    try {
+      const configRef = db().collection(COLLECTIONS.SETTINGS || "settings").doc("system");
+      await db().runTransaction(async (tx) => {
+        const cfgSnap = await tx.get(configRef);
+        const curSeq = cfgSnap.exists && cfgSnap.data().orderSeq ? cfgSnap.data().orderSeq : 1050;
+        orderNo = curSeq + 1;
+        tx.set(configRef, { orderSeq: orderNo }, { merge: true });
+      });
+    } catch (e) {
+      orderNo = Math.floor(1000 + (now % 9000));
+    }
+
+    let items = [];
+    if (Array.isArray(customItems) && customItems.length > 0) {
+      items = customItems.map((ai) => {
+        const origMatch = origOrder.items?.find((oi) => oi.name === ai.name || oi.productId === ai.productId);
+        const itemPrice = Number(ai.price ?? origMatch?.price ?? 0);
+        return {
+          productId: ai.productId || origMatch?.productId || `rep-${Date.now()}`,
+          variantId: ai.variantId || origMatch?.variantId || "default",
+          name: ai.name || origMatch?.name || "Replacement Item",
+          variantLabel: ai.variantLabel || ai.unit || origMatch?.variantLabel || "1 Unit",
+          price: itemPrice,
+          unitPrice: itemPrice,
+          originalPrice: itemPrice,
+          isFreeReplacement: true,
+          qty: Number(ai.qty) || 1,
+          images: origMatch?.images || ai.images || [],
+          image: origMatch?.image || ai.image || null,
+        };
+      });
+    } else if (Array.isArray(origOrder.items) && origOrder.items.length > 0) {
+      items = origOrder.items.map((oi) => {
+        const itemPrice = Number(oi.price || 0);
+        return {
+          ...oi,
+          price: itemPrice,
+          unitPrice: itemPrice,
+          originalPrice: itemPrice,
+          isFreeReplacement: true,
+        };
+      });
+    } else {
+      items = [
+        {
+          productId: "rep-item",
+          variantId: "default",
+          name: "Replacement Item",
+          variantLabel: "1 Unit",
+          price: 0,
+          unitPrice: 0,
+          originalPrice: 0,
+          isFreeReplacement: true,
+          qty: 1,
+        },
+      ];
+    }
+
+    const itemsTotalValue = items.reduce(
+      (sum, item) => sum + (Number(item.price) || 0) * (Number(item.qty) || 1),
+      0
+    );
+
+    const orderRef = db().collection(COLLECTIONS.ORDERS).doc();
+    const effectiveNotes =
+      adminNotes ||
+      reason ||
+      `Free replacement redelivery for original Order #${origOrder.orderNo || ''}`;
+
+    const redeliveryOrder = {
+      orderNo,
+      userId: origOrder.userId || null,
+      userName: origOrder.userName || "Customer",
+      userEmail: origOrder.userEmail || "",
+      userPhone: origOrder.userPhone || "",
+      items,
+      couponCode: null,
+      couponId: null,
+      addressSnapshot: address || origOrder.addressSnapshot || origOrder.address || null,
+      deliveryMode: "ON_DEMAND",
+      notes: effectiveNotes,
+      paymentMethod: "FREE_REPLACEMENT",
+      paymentStatus: PAYMENT_STATUS.PAID,
+      itemsTotalValue,
+      replacementDiscount: itemsTotalValue,
+      subtotal: itemsTotalValue,
+      tax: 0,
+      deliveryCharge: 0,
+      discount: itemsTotalValue,
+      total: 0,
+      distanceKm: origOrder.distanceKm || 1.5,
+      status: ORDER_STATUS.PLACED,
+      redeliveryStatus: "AWAITING_CUSTOMER_CONFIRMATION",
+      customerAvailability: {
+        status: "AWAITING",
+        notifiedAt: now,
+        confirmedAt: null,
+        rescheduledSlot: null,
+        declinedReason: null,
+        declinedAt: null,
+        remindedAt: null,
+      },
+      statusHistory: [
+        {
+          status: ORDER_STATUS.PLACED,
+          redeliveryStatus: "AWAITING_CUSTOMER_CONFIRMATION",
+          at: now,
+          note: "Free replacement request created — awaiting customer availability confirmation",
+        },
+      ],
+      assignedPartnerId: null,
+      isRedelivery: true,
+      originalOrderId: origOrder.id,
+      originalOrderNo: origOrder.orderNo || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await orderRef.set(redeliveryOrder);
+
+    // Update original order to cross-reference replacement
+    try {
+      await db().collection(COLLECTIONS.ORDERS).doc(origOrder.id).set(
+        {
+          hasRedelivery: true,
+          replacementOrderId: orderRef.id,
+          replacementOrderNo: orderNo,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+    } catch (_) {}
+
+    // Send customer notification and popup trigger
+    try {
+      if (redeliveryOrder.userId) {
+        await notifyUser(
+          redeliveryOrder.userId,
+          `Replacement Arranged · Order #${origOrder.orderNo || ''}`,
+          `We have arranged a free replacement for your item(s). Are you available to receive it now? Please open the app to confirm or pick a time slot.`,
+          {
+            type: "REDELIVERY_CONFIRMATION",
+            orderId: orderRef.id,
+            orderNo: redeliveryOrder.orderNo,
+            originalOrderNo: origOrder.orderNo || '',
+          }
+        );
+      }
+    } catch (e) {
+      console.warn("Could not notify customer of replacement:", e.message);
+    }
+
+    // Invalidate caches
+    invalidateReadsCache(orderRef.id);
+    invalidateReadsCache(origOrder.id);
+    if (redeliveryOrder.userId) invalidateReadsCache(redeliveryOrder.userId);
+    invalidateReadsCache("orders");
+    invalidateOrderMemoryCache(orderRef.id, redeliveryOrder.userId);
+    invalidateOrderMemoryCache(origOrder.id, origOrder.userId);
+
+    res.status(201).json({
+      id: orderRef.id,
+      ...redeliveryOrder,
+    });
+  })
+);
+
 module.exports = router;
+

@@ -123,7 +123,7 @@ async function placeOrder({ userId, cartItems, couponCode, address, notes, payme
     // Check after idempotency lookup: retrying an already-created order stays safe after closing.
     const currentStatus = storeStatus(Date.now(), config);
     if (!currentStatus.isOpen) {
-      throw Object.assign(new Error(currentStatus.label || 'The shop is closed. Order daily from 10 AM to 11 PM (India time).'), {
+      throw Object.assign(new Error(currentStatus.label || 'Store is currently closed for orders. Please try again when the store opens.'), {
         statusCode: 422, code: 'STORE_CLOSED',
       });
     }
@@ -468,17 +468,40 @@ async function updateStatus(orderId, nextStatus, user, options = {}) {
 
     assertValidTransition(order.status, nextStatus);
 
-    // Hard stop: a UPI_MANUAL order can never be fulfilled (packed/shipped/delivered) unless the
-    // customer has at least claimed payment. Without this, "fake payment" (nobody paid, nobody even
-    // tapped "I've Paid") would still let staff advance the order to OUT_FOR_DELIVERY/DELIVERED.
+    // Hard stop: prepaid orders (e.g. UPI_MANUAL) must be verified and approved (marked PAID)
+    // before the order can be approved or moved to PACKING / OUT_FOR_DELIVERY.
     if (
       nextStatus !== ORDER_STATUS.CANCELLED &&
-      order.paymentMethod === PAYMENT_METHOD.UPI_MANUAL &&
-      order.paymentStatus === PAYMENT_STATUS.PENDING
+      order.paymentMethod !== PAYMENT_METHOD.COD &&
+      order.paymentMethod !== "FREE_REPLACEMENT" &&
+      order.paymentStatus !== PAYMENT_STATUS.PAID
     ) {
       throw Object.assign(
-        new Error("This order's UPI payment has not been confirmed by the customer yet — it cannot be advanced until they tap \"I've Paid\" (or you mark it PAID directly)."),
-        { statusCode: 422, code: "PAYMENT_NOT_CONFIRMED" }
+        new Error("Payment must be verified and approved first before approving this order. Please verify payment first."),
+        { statusCode: 422, code: "PAYMENT_NOT_VERIFIED" }
+      );
+    }
+
+    // Hard stop: redelivery orders cannot be dispatched automatically while awaiting customer confirmation
+    if (
+      nextStatus === ORDER_STATUS.OUT_FOR_DELIVERY &&
+      order.isRedelivery &&
+      order.redeliveryStatus === "AWAITING_CUSTOMER_CONFIRMATION"
+    ) {
+      throw Object.assign(
+        new Error("Customer has not confirmed availability for this replacement yet. Please wait for customer confirmation or send a reminder before dispatching."),
+        { statusCode: 422, code: "AWAITING_CUSTOMER_CONFIRMATION" }
+      );
+    }
+
+    if (
+      nextStatus !== ORDER_STATUS.CANCELLED &&
+      order.isRedelivery &&
+      order.redeliveryStatus === "DECLINED"
+    ) {
+      throw Object.assign(
+        new Error("Customer declined this redelivery. The request is closed and cannot be dispatched."),
+        { statusCode: 422, code: "REDELIVERY_DECLINED" }
       );
     }
 
@@ -505,15 +528,17 @@ async function updateStatus(orderId, nextStatus, user, options = {}) {
             const dLat = Number(address?.lat ?? address?.latitude);
             const dLng = Number(address?.lng ?? address?.longitude);
             if (Number.isFinite(pLat) && Number.isFinite(pLng) && Number.isFinite(dLat) && Number.isFinite(dLng) && (pLat !== 0 || pLng !== 0)) {
-              const { haversineKm } = require("../config/deliveryArea");
-              const remainingKm = haversineKm(pLat, pLng, dLat, dLng) * 1.3;
-              deliveryMinutes = Math.max(2, Math.min(180, Math.ceil(remainingKm / 20 * 60)));
+              const { haversineKm, STORE_LOCATION } = require("../config/deliveryArea");
+              const storeToDest = haversineKm(STORE_LOCATION.lat, STORE_LOCATION.lng, dLat, dLng) || Number(order.distanceKm) || 2;
+              const rawRemaining = haversineKm(pLat, pLng, dLat, dLng);
+              const effectiveKm = (rawRemaining !== null && rawRemaining <= 6) ? rawRemaining * 1.3 : storeToDest * 1.3;
+              deliveryMinutes = Math.max(3, Math.min(25, Math.ceil(effectiveKm / 20 * 60)));
             }
           }
         } catch (_) {}
       }
       if (!deliveryMinutes && Number.isFinite(Number(order.distanceKm)) && Number(order.distanceKm) > 0) {
-        deliveryMinutes = Math.max(2, Math.min(180, Math.ceil(Number(order.distanceKm) * 1.3 / 20 * 60)));
+        deliveryMinutes = Math.max(3, Math.min(25, Math.ceil(Number(order.distanceKm) * 1.3 / 20 * 60)));
       }
       if (!deliveryMinutes) deliveryMinutes = 10;
     }

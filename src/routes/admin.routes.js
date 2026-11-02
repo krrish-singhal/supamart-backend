@@ -247,30 +247,67 @@ router.post(
   authenticate,
   requireRole(ROLES.ADMIN),
   asyncHandler(async (req, res) => {
-    const { title, body, audience, targetScreen } = req.body;
+    const { title, body, audience, audienceKey, targetScreen } = req.body;
     if (!title || !body) {
       const e = new Error("title and body are required");
       e.statusCode = 422;
       throw e;
     }
-    // Collect all FCM tokens from users
+
     const usersSnap = await db().collection(COLLECTIONS.USERS).get();
+    let eligibleUsers = usersSnap.docs.filter((d) => d.data().offerNotificationsEnabled !== false);
+
+    // Apply audience segment filtering
+    const key = String(audienceKey || "").toUpperCase();
+    const audStr = String(audience || "").toLowerCase();
+
+    if (key === "ACTIVE" || audStr.includes("active")) {
+      const sevenDaysAgo = Date.now() - 7 * 86400000;
+      const recentOrdersSnap = await db()
+        .collection(COLLECTIONS.ORDERS)
+        .where("createdAt", ">=", sevenDaysAgo)
+        .get();
+      const activeUserIds = new Set();
+      recentOrdersSnap.docs.forEach((doc) => {
+        const ord = doc.data();
+        if (ord.status !== ORDER_STATUS.CANCELLED && ord.userId) {
+          activeUserIds.add(ord.userId);
+        }
+      });
+      eligibleUsers = eligibleUsers.filter((d) => {
+        const u = d.data();
+        return activeUserIds.has(d.id) || (u.lastOrderAt && u.lastOrderAt >= sevenDaysAgo);
+      });
+    } else if (key === "MSCLUB" || audStr.includes("club")) {
+      eligibleUsers = eligibleUsers.filter((d) => {
+        const u = d.data();
+        return Boolean(u.isMSClubMember || u.clubMember);
+      });
+    } else if (key === "NEW" || audStr.includes("new")) {
+      eligibleUsers = eligibleUsers.filter((d) => {
+        const u = d.data();
+        return !u.totalOrders || u.totalOrders === 0;
+      });
+    }
+
+    // Collect push tokens from target audience
     const tokens = new Set();
-    usersSnap.docs.forEach((d) => {
+    eligibleUsers.forEach((d) => {
       const user = d.data();
-      if (user.offerNotificationsEnabled === false) return;
       const fcmTokens = user.fcmTokens || [];
       fcmTokens.forEach((token) => tokens.add(token));
     });
     const tokenList = [...tokens];
-    
+
     // Create record in broadcasts collection
     const record = {
       title,
       body,
       audience: audience || "All customers",
-      targetScreen: targetScreen || "Home screen",
+      audienceKey: audienceKey || "ALL",
+      targetScreen: targetScreen || "In-App Notification Panel",
       delivered: tokenList.length,
+      inboxCount: eligibleUsers.length,
       opened: 0,
       createdAt: Date.now(),
     };
@@ -278,7 +315,6 @@ router.post(
 
     // Persist inbox entries in bounded batches so a broadcast request does not wait
     // on one network round-trip per customer.
-    const eligibleUsers = usersSnap.docs.filter((d) => d.data().offerNotificationsEnabled !== false);
     const cacheInvalidations = [];
     for (let start = 0; start < eligibleUsers.length; start += 450) {
       const batch = db().batch();
@@ -288,7 +324,7 @@ router.post(
         batch.set(notificationRef, {
           title,
           body,
-          data: { type: "BROADCAST", targetScreen: targetScreen || "Home screen" },
+          data: { type: "BROADCAST", targetScreen: targetScreen || "In-App Notification Panel" },
           read: false,
           createdAt: Date.now(),
         });
@@ -308,7 +344,7 @@ router.post(
         console.error("Broadcast push delivery failed:", err?.message || err);
       });
     }
-    res.json({ id: docRef.id, sent: tokenList.length, ...record });
+    res.json({ id: docRef.id, sent: tokenList.length, inboxCount: eligibleUsers.length, ...record });
   })
 );
 

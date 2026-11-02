@@ -112,7 +112,7 @@ async function deliver(to, subject, html, text) {
       disableUrlAccess: true,
     });
     const delivered = Array.isArray(result.accepted) && result.accepted.length > 0;
-    return { delivered, ...(delivered ? { provider: 'SMTP' } : { error: resendError || 'SMTP server did not accept the email.' }) };
+    return { delivered, ...(delivered ? {} : { error: resendError || 'SMTP server did not accept the email.' }) };
   } catch (error) {
     // Never log codes, credentials or reset URLs, including in development.
     const failure = smtpFailure(error);

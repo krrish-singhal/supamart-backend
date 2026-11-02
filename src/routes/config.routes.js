@@ -6,13 +6,14 @@ const { authenticate, requireRole } = require("../middleware/auth");
 const { db } = require("../config/firebase");
 const { ROLES, COLLECTIONS } = require("../config/constants");
 const { configSchema } = require("../schemas/config.schema");
+const { invalidateReadsCache } = require("./reads.routes");
 
 const router = express.Router();
 
-// In-memory cache for config
+// In-memory cache for config (short 2s TTL for ultra-fast dynamic reactivity)
 let cache = null;
 let cacheAt = 0;
-const CACHE_TTL_MS = 30_000;
+const CACHE_TTL_MS = 2_000;
 
 // GET /api/config — public; used by apps to get radius, slots, min order, etc.
 router.get(
@@ -73,6 +74,11 @@ router.put(
     }
     await db().collection(COLLECTIONS.CONFIG).doc("global").set(withStoreHours(withDeliveryArea(value)));
     cache = null; // invalidate cache
+    cacheAt = 0;
+    try {
+      invalidateReadsCache("config");
+      invalidateReadsCache();
+    } catch (_) {}
     res.json({ ...withStoreHours(withDeliveryArea(value)), serverTime: Date.now(), storeStatus: storeStatus(Date.now(), value) });
   })
 );

@@ -221,6 +221,22 @@ test('store hours cover every minute from 10 AM until 11 PM in Asia/Kolkata', ()
   assert.equal(storeStatus('invalid').isOpen, false);
 });
 
+test('store toggle dynamically controls open/closed status irrespective of time', () => {
+  const midnight = Date.UTC(2026, 9, 22, 0, 0 - 330); // 12:00 AM India
+  const noon = Date.UTC(2026, 9, 22, 0, 720 - 330); // 12:00 PM India
+  const lateNight = Date.UTC(2026, 9, 22, 0, 120 - 330); // 2:00 AM India
+
+  // When toggle is ON: open irrespective of time
+  assert.equal(storeStatus(midnight, { isStoreOpen: true }).isOpen, true);
+  assert.equal(storeStatus(lateNight, { storeOpen: true }).isOpen, true);
+  assert.equal(storeStatus(lateNight, { isStoreOpen: 'true' }).isOpen, true);
+
+  // When toggle is OFF: closed irrespective of standard operating hours
+  assert.equal(storeStatus(noon, { isStoreOpen: false }).isOpen, false);
+  assert.equal(storeStatus(noon, { storeOpen: false }).isOpen, false);
+  assert.equal(storeStatus(noon, { storeOpen: 'false' }).isOpen, false);
+});
+
 test('map distance quotes match all five delivery tiers and reject outside pins', () => {
   for (const [km, fee, withinRadius] of [[0.5, 10, true], [1.5, 15, true], [2.5, 20, true], [3.6, 25, true], [5, 30, true], [6, 0, false]]) {
     const point = destination(km, 125);

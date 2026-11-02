@@ -20,6 +20,8 @@ const configSchema = Joi.object({
   slots: Joi.array().optional(),
   deliveryMode: Joi.string().optional(),
   storeHours: Joi.object().unknown(true).optional(),
+  isStoreOpen: Joi.boolean().optional(),
+  storeOpen: Joi.boolean().optional(),
   orderSeq: Joi.number().integer().min(1000).optional(),
   updatedAt: Joi.number().optional(),
 }).unknown(true);

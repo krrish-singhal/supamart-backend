@@ -72,11 +72,11 @@ function computeDiscount(offer, subtotal, items, products) {
 
   if (offer.kind === OFFER_KIND.PERCENT) {
     discount = (base * Number(offer.value)) / 100;
-    if (offer.maxDiscount != null && Number(offer.maxDiscount) > 0) {
-      discount = Math.min(discount, Number(offer.maxDiscount));
-    }
   } else {
     discount = Number(offer.value) || 0;
+  }
+  if (offer.maxDiscount != null && Number(offer.maxDiscount) > 0) {
+    discount = Math.min(discount, Number(offer.maxDiscount));
   }
   return Number(Math.min(discount, subtotal).toFixed(2));
 }
